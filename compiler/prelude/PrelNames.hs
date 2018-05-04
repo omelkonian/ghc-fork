@@ -1884,6 +1884,9 @@ someTypeRepDataConKey = mkPreludeTyConUnique 189
 typeSymbolAppendFamNameKey :: Unique
 typeSymbolAppendFamNameKey = mkPreludeTyConUnique 190
 
+instanceOfTyConKey :: Unique
+instanceOfTyConKey = mkPreludeTyConUnique 191
+
 ---------------- Template Haskell -------------------
 --      THNames.hs: USES TyConUniques 200-299
 -----------------------------------------------------
@@ -2039,7 +2042,8 @@ vecElemDataConKeys = map mkPreludeDataConUnique [89..98]
 -- Typeable things
 kindRepTyConAppDataConKey, kindRepVarDataConKey, kindRepAppDataConKey,
     kindRepFunDataConKey, kindRepTYPEDataConKey,
-    kindRepTypeLitSDataConKey, kindRepTypeLitDDataConKey
+    kindRepTypeLitSDataConKey, kindRepTypeLitDDataConKey,
+    instanceOfDataConKey
     :: Unique
 kindRepTyConAppDataConKey = mkPreludeDataConUnique 100
 kindRepVarDataConKey      = mkPreludeDataConUnique 101
@@ -2053,6 +2057,7 @@ typeLitSymbolDataConKey, typeLitNatDataConKey :: Unique
 typeLitSymbolDataConKey   = mkPreludeDataConUnique 107
 typeLitNatDataConKey      = mkPreludeDataConUnique 108
 
+instanceOfDataConKey = mkPreludeDataConUnique 109
 
 ---------------- Template Haskell -------------------
 --      THNames.hs: USES DataUniques 200-250
@@ -2409,6 +2414,9 @@ timesNaturalIdKey       = mkPreludeMiscIdUnique 566
 mkNaturalIdKey          = mkPreludeMiscIdUnique 567
 naturalSDataConKey      = mkPreludeMiscIdUnique 568
 wordToNaturalIdKey      = mkPreludeMiscIdUnique 569
+
+instanceOfAxiomKey :: Unique
+instanceOfAxiomKey = mkPreludeMiscIdUnique 563
 
 {-
 ************************************************************************

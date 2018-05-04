@@ -2007,9 +2007,10 @@ mkCallUDs' env f args
 
     type_determines_value pred    -- See Note [Type determines value]
         = case classifyPredType pred of
-            ClassPred cls _ -> not (isIPClass cls)  -- Superclasses can't be IPs
-            EqPred {}       -> True
-            IrredPred {}    -> True   -- Things like (D []) where D is a
+            ClassPred cls _   -> not (isIPClass cls)  -- Superclasses can't be IPs
+            EqPred {}         -> True
+            InstanceOfPred {} -> True
+            IrredPred {}      -> True   -- Things like (D []) where D is a
                                       -- Constraint-ranged family; Trac #7785
             ForAllPred {}   -> True
 
@@ -2018,7 +2019,7 @@ Note [Type determines value]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Only specialise if all overloading is on non-IP *class* params,
 because these are the ones whose *type* determines their *value*.  In
-parrticular, with implicit params, the type args *don't* say what the
+particular, with implicit params, the type args *don't* say what the
 value of the implicit param is!  See Trac #7101
 
 However, consider

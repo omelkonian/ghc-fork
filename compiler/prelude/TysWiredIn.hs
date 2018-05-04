@@ -94,10 +94,11 @@ module TysWiredIn (
         liftedTypeKindTyCon, constraintKindTyCon,
         liftedTypeKindTyConName,
 
-        -- * Equality predicates
+        -- * Equality and instance predicates
         heqTyCon, heqTyConName, heqClass, heqDataCon,
         eqTyCon, eqTyConName, eqClass, eqDataCon, eqTyCon_RDR,
         coercibleTyCon, coercibleTyConName, coercibleDataCon, coercibleClass,
+        instanceOfTyCon, instanceOfDataCon, instanceOfNewtypeAxiom,
 
         -- * RuntimeRep and friends
         runtimeRepTyCon, vecCountTyCon, vecElemTyCon,
@@ -147,6 +148,7 @@ import RdrName
 import Name
 import NameEnv          ( NameEnv, mkNameEnv, lookupNameEnv, lookupNameEnv_NF )
 import NameSet          ( NameSet, mkNameSet, elemNameSet )
+import FamInstEnv       ( mkNewTypeCoAxiom )
 import BasicTypes       ( Arity, Boxity(..), TupleSort(..), ConTagZ,
                           SourceText(..) )
 import ForeignCall
@@ -218,6 +220,7 @@ wiredInTyCons = [ -- Units are not treated like other tuples, because then
                 , heqTyCon
                 , eqTyCon
                 , coercibleTyCon
+                , instanceOfTyCon
                 , typeNatKindCon
                 , typeSymbolKindCon
                 , runtimeRepTyCon
@@ -243,7 +246,7 @@ mkWiredInIdName :: Module -> FastString -> Unique -> Id -> Name
 mkWiredInIdName mod fs uniq id
  = mkWiredInName mod (mkOccNameFS Name.varName fs) uniq (AnId id) UserSyntax
 
--- See Note [Kind-changing of (~) and Coercible]
+-- See Note [Kind-changing of (~), (<~) and Coercible]
 -- in libraries/ghc-prim/GHC/Types.hs
 eqTyConName, eqDataConName, eqSCSelIdName :: Name
 eqTyConName   = mkWiredInTyConName   UserSyntax gHC_TYPES (fsLit "~")   eqTyConKey   eqTyCon
@@ -260,11 +263,18 @@ heqTyConName   = mkWiredInTyConName   UserSyntax gHC_TYPES (fsLit "~~")   heqTyC
 heqDataConName = mkWiredInDataConName UserSyntax gHC_TYPES (fsLit "HEq#") heqDataConKey heqDataCon
 heqSCSelIdName = mkWiredInIdName gHC_TYPES (fsLit "heq_sel") heqSCSelIdKey heqSCSelId
 
--- See Note [Kind-changing of (~) and Coercible] in libraries/ghc-prim/GHC/Types.hs
+-- See Note [Kind-changing of (~), (<~) and Coercible]
+-- in libraries/ghc-prim/GHC/Types.hs
 coercibleTyConName, coercibleDataConName, coercibleSCSelIdName :: Name
 coercibleTyConName   = mkWiredInTyConName   UserSyntax gHC_TYPES (fsLit "Coercible")  coercibleTyConKey   coercibleTyCon
 coercibleDataConName = mkWiredInDataConName UserSyntax gHC_TYPES (fsLit "MkCoercible") coercibleDataConKey coercibleDataCon
 coercibleSCSelIdName = mkWiredInIdName gHC_TYPES (fsLit "coercible_sel") coercibleSCSelIdKey coercibleSCSelId
+
+instanceOfTyConName, instanceOfDataConName, instanceOfAxiomName :: Name
+instanceOfTyConName   = mkWiredInTyConName UserSyntax gHC_TYPES (fsLit "<~") instanceOfTyConKey instanceOfTyCon
+instanceOfDataConName = mkWiredInDataConName UserSyntax gHC_TYPES (fsLit "InstOf") instanceOfDataConKey instanceOfDataCon
+instanceOfAxiomName   = mkWiredInName gHC_TYPES (mkDataOccFS $ fsLit "InstOfArrow") instanceOfAxiomKey
+                            (ACoAxiom (toBranchedAxiom instanceOfNewtypeAxiom)) UserSyntax
 
 charTyConName, charDataConName, intTyConName, intDataConName :: Name
 charTyConName     = mkWiredInTyConName   UserSyntax gHC_TYPES (fsLit "Char") charTyConKey charTyCon
@@ -1001,7 +1011,7 @@ mk_sum arity = (tycon, sum_cons)
 {-
 ************************************************************************
 *                                                                      *
-              Equality types and classes
+              Equality/instanceOf types and classes
 *                                                                      *
 ********************************************************************* -}
 
@@ -1012,10 +1022,11 @@ mk_sum arity = (tycon, sum_cons)
 -- necessary because the functional-dependency coverage check looks
 -- through superclasses, and (~#) is handled in that check.
 
-eqTyCon,   heqTyCon,   coercibleTyCon   :: TyCon
-eqClass,   heqClass,   coercibleClass   :: Class
-eqDataCon, heqDataCon, coercibleDataCon :: DataCon
-eqSCSelId, heqSCSelId, coercibleSCSelId :: Id
+eqTyCon,   heqTyCon,   coercibleTyCon, instanceOfTyCon     :: TyCon
+eqClass,   heqClass,   coercibleClass                      :: Class
+eqDataCon, heqDataCon, coercibleDataCon, instanceOfDataCon :: DataCon
+eqSCSelId, heqSCSelId, coercibleSCSelId                    :: Id
+instanceOfNewtypeAxiom                                     :: CoAxiom Unbranched
 
 (eqTyCon, eqClass, eqDataCon, eqSCSelId)
   = (tycon, klass, datacon, sc_sel_id)
@@ -1070,6 +1081,38 @@ eqSCSelId, heqSCSelId, coercibleSCSelId :: Id
     tvs@[k,a,b] = binderVars binders
     sc_pred     = mkTyConApp eqReprPrimTyCon (mkTyVarTys [k, k, a, b])
     sc_sel_id   = mkDictSelId coercibleSCSelIdName klass
+
+(instanceOfTyCon, instanceOfDataCon, instanceOfNewtypeAxiom)
+  = (tycon, datacon, newtypeaxiom)
+  where
+    name = instanceOfTyConName
+    kis = [liftedTypeKind, liftedTypeKind]
+    tvs@[a, b] = mkTemplateKindVars kis
+    sc_pred = mkTyVarTy a `mkFunTy` mkTyVarTy b
+    binders = mkTemplateAnonTyConBinders kis
+    roles = [Nominal, Nominal]
+
+    tycon = mkAlgTyCon
+      name -- name :: Name
+      binders -- binders :: [TyConBinder]
+      constraintKind -- result kind :: Kind
+      roles --  role of each TyVar :: [Role]
+      Nothing -- C-type when using CAPI FFI :: Maybe CType
+      [] -- stupid theta :: [PredType]
+      (mkDataTyConRhs [instanceOfDataCon]) -- info about data constructors :: AlgTyConRhs
+      (VanillaAlgTyCon (mkPrelTyConRepName name)) -- flavour (vanila/type-family/etc...) :: AlgTyConFlav
+      False -- GADT? :: Bool
+    datacon = pcDataCon
+      instanceOfDataConName -- :: Name
+      tvs -- :: [TyVar]
+      [sc_pred] -- :: [Type]
+      tycon -- :: TyCon
+    newtypeaxiom = mkNewTypeCoAxiom
+      instanceOfAxiomName -- :: Name
+      tycon -- :: TyCon
+      tvs -- :: [TyVar]
+      roles -- :: [Role]
+      sc_pred -- :: Type
 
 mk_class :: TyCon -> PredType -> Id -> Class
 mk_class tycon sc_pred sc_sel_id

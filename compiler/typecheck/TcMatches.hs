@@ -1113,7 +1113,7 @@ the variables they bind into scope, and typecheck the thing_inside.
 *                                                                      *
 ************************************************************************
 
-@sameNoOfArgs@ takes a @[RenamedMatch]@ and decides whether the same
+@checkArgs@ takes a @[RenamedMatch]@ and decides whether the same
 number of args are used in each equation.
 -}
 

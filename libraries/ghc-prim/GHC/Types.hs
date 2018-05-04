@@ -31,7 +31,7 @@ module GHC.Types (
         SPEC(..),
         Nat, Symbol,
         Any,
-        type (~~), Coercible,
+        type (~~), Coercible, type (<~),
         TYPE, RuntimeRep(..), Type, Constraint,
           -- The historical type * should ideally be written as
           -- `type *`, without the parentheses. But that's a true
@@ -185,10 +185,10 @@ necessary. See [FFI type roles] in TcForeign.  -}
 ********************************************************************* -}
 
 {-
-Note [Kind-changing of (~) and Coercible]
+Note [Kind-changing of (~), (<~) and Coercible]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-(~) and Coercible are tricky to define. To the user, they must appear as
+(~), (<~) and Coercible are tricky to define. To the user, they must appear as
 constraints, but we cannot define them as such in Haskell. But we also cannot
 just define them only in GHC.Prim (like (->)), because we need a real module
 for them, e.g. to compile the constructor's info table.
@@ -266,6 +266,9 @@ class a ~ b
 --      @since 4.7.0.0
 class Coercible a b
   -- See also Note [The equality types story] in TysPrim
+
+-- | A constraint inhabited only if type `a` is an instance of type `b`.
+newtype (<~) b a = InstOf (b -> a)
 
 {- *********************************************************************
 *                                                                      *

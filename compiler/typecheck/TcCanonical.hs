@@ -86,14 +86,16 @@ canonicalize :: Ct -> TcS (StopOrContinue Ct)
 canonicalize (CNonCanonical { cc_ev = ev })
   = {-# SCC "canNC" #-}
     case classifyPredType pred of
-      ClassPred cls tys     -> do traceTcS "canEvNC:cls" (ppr cls <+> ppr tys)
-                                  canClassNC ev cls tys
-      EqPred eq_rel ty1 ty2 -> do traceTcS "canEvNC:eq" (ppr ty1 $$ ppr ty2)
-                                  canEqNC    ev eq_rel ty1 ty2
-      IrredPred {}          -> do traceTcS "canEvNC:irred" (ppr pred)
-                                  canIrred ev
-      ForAllPred _ _ pred   -> do traceTcS "canEvNC:forall" (ppr pred)
-                                  canForAll ev (isClassPred pred)
+      ClassPred cls tys      -> do traceTcS "canEvNC:cls" (ppr cls <+> ppr tys)
+                                   canClassNC ev cls tys
+      EqPred eq_rel ty1 ty2  -> do traceTcS "canEvNC:eq" (ppr ty1 $$ ppr ty2)
+                                   canEqNC    ev eq_rel ty1 ty2
+      IrredPred {}           -> do traceTcS "canEvNC:irred" (ppr pred)
+                                   canIrred ev
+      ForAllPred _ _ pred    -> do traceTcS "canEvNC:forall" (ppr pred)
+                                   canForAll ev (isClassPred pred)
+      InstanceOfPred ty1 ty2 -> do traceTcS "canEvNC:inst" (ppr ty1 $$ ppr ty2)
+                                   canInstanceOfNC ev
   where
     pred = ctEvPred ev
 
@@ -135,6 +137,9 @@ canonicalize (CFunEqCan { cc_ev = ev
 
 canonicalize (CHoleCan { cc_ev = ev, cc_hole = hole })
   = canHole ev hole
+
+canonicalize (CInstanceOfCan { cc_ev = ev })
+  = canInstanceOfNC ev
 
 {-
 ************************************************************************
@@ -2462,3 +2467,14 @@ unify_derived loc role    orig_ty1 orig_ty2
 maybeSym :: SwapFlag -> TcCoercion -> TcCoercion
 maybeSym IsSwapped  co = mkTcSymCo co
 maybeSym NotSwapped co = co
+
+{-
+************************************************************************
+*                                                                      *
+                  InstancecOf Canonicalization
+*                                                                      *
+************************************************************************
+-}
+
+canInstanceOfNC :: CtEvidence -> TcS (StopOrContinue Ct)
+canInstanceOfNC _ = panic "ToDo: canon <~"

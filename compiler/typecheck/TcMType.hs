@@ -254,10 +254,11 @@ newDict cls tys
 
 predTypeOccName :: PredType -> OccName
 predTypeOccName ty = case classifyPredType ty of
-    ClassPred cls _ -> mkDictOcc (getOccName cls)
-    EqPred {}       -> mkVarOccFS (fsLit "co")
-    IrredPred {}    -> mkVarOccFS (fsLit "irred")
-    ForAllPred {}   -> mkVarOccFS (fsLit "df")
+    ClassPred cls _   -> mkDictOcc (getOccName cls)
+    EqPred {}         -> mkVarOccFS (fsLit "co")
+    IrredPred {}      -> mkVarOccFS (fsLit "irred")
+    ForAllPred {}     -> mkVarOccFS (fsLit "df")
+    InstanceOfPred {} -> mkVarOccFS (fsLit "InstanceOf")
 
 {-
 ************************************************************************

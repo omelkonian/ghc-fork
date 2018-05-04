@@ -109,7 +109,7 @@ way: because of uniques there are no scoping issues left.  The only
 difference is that non-recursive bindings can bind primitive values.
 
 Even for non-recursive binding groups we add typings for each binder
-to the LVE for the following reason.  When each individual binding is
+to the LIE for the following reason.  When each individual binding is
 checked the type of its LHS is unified with that of its RHS; and
 type-checking the LHS of course requires that the binder is in scope.
 
@@ -574,9 +574,9 @@ tcPolyBinds :: TcSigFun -> TcPragEnv
             -> [LHsBind GhcRn]  -- None are PatSynBind
             -> TcM (LHsBinds GhcTcId, [TcId])
 
--- Typechecks a single bunch of values bindings all together,
+-- Typechecks a single bunch of value bindings all together,
 -- and generalises them.  The bunch may be only part of a recursive
--- group, because we use type signatures to maximise polymorphism
+-- group, because we use type signatures to maximise polymorphism.
 --
 -- Returns a list because the input may be a single non-recursive binding,
 -- in which case the dependency order of the resulting bindings is
@@ -1627,7 +1627,7 @@ data GeneralisationPlan
                         -- Explicit generalisation
 
 -- A consequence of the no-AbsBinds choice (NoGen) is that there is
--- no "polymorphic Id" and "monmomorphic Id"; there is just the one
+-- no "polymorphic Id" and "monomorphic Id"; there is just the one
 
 instance Outputable GeneralisationPlan where
   ppr NoGen          = text "NoGen"

@@ -1524,6 +1524,7 @@ checkInstTermination theta head_pred
    check foralld_tvs pred
      = case classifyPredType pred of
          EqPred {}    -> return ()  -- See Trac #4200.
+         InstanceOfPred {} -> return ()
          IrredPred {} -> check2 foralld_tvs pred (sizeType pred)
          ClassPred cls tys
            | isTerminatingClass cls
@@ -2166,6 +2167,7 @@ sizePred ty = goClass ty
     go (EqPred {})           = 0
     go (IrredPred ty)        = sizeType ty
     go (ForAllPred _ _ pred) = goClass pred
+    go (InstanceOfPred {})   = 0
 
 -- | When this says "True", ignore this class constraint during
 -- a termination check

@@ -37,3 +37,5 @@ int8ElemRepDataConTy, int16ElemRepDataConTy, int32ElemRepDataConTy,
 anyTypeOfKind :: Kind -> Type
 unboxedTupleKind :: [Type] -> Type
 mkPromotedListTy :: Type -> [Type] -> Type
+
+instanceOfTyCon :: TyCon

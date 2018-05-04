@@ -489,7 +489,7 @@ constraint solver.  It's not strictly essential, and indeed
 (historically but still there) Var.tcTyVarDetails returns
 vanillaSkolemTv for a TyVar.
 
-But ultimately I want to seeparate Type from TcType, and in that case
+But ultimately I want to separate Type from TcType, and in that case
 we would need to enforce the separation.
 -}
 
@@ -537,7 +537,7 @@ data MetaInfo
                    -- See Note [The flattening story] in TcFlatten
 
    | FlatSkolTv    -- A flatten skolem tyvar
-                   -- Just like FlatMetaTv, but is comletely "owned" by
+                   -- Just like FlatMetaTv, but is completely "owned" by
                    --   its Given CFunEqCan.
                    -- It is filled in /only/ by unflattenGivens
                    -- See Note [The flattening story] in TcFlatten
@@ -2022,17 +2022,18 @@ pickQuantifiablePreds qtvs theta
               -- see Note [Overview of implicit CallStacks]
               -> False
 
-            | isIPClass cls    -> True -- See note [Inheriting implicit parameters]
+            | isIPClass cls      -> True -- See note [Inheriting implicit parameters]
 
             | otherwise
               -> pick_cls_pred flex_ctxt cls tys
 
-          EqPred ReprEq ty1 ty2 -> pick_cls_pred flex_ctxt coercibleClass [ty1, ty2]
+          EqPred ReprEq ty1 ty2  -> pick_cls_pred flex_ctxt coercibleClass [ty1, ty2]
             -- representational equality is like a class constraint
 
-          EqPred NomEq ty1 ty2  -> quant_fun ty1 || quant_fun ty2
-          IrredPred ty          -> tyCoVarsOfType ty `intersectsVarSet` qtvs
-          ForAllPred {}         -> False
+          EqPred NomEq ty1 ty2   -> quant_fun ty1 || quant_fun ty2
+          IrredPred ty           -> tyCoVarsOfType ty `intersectsVarSet` qtvs
+          ForAllPred {}          -> False
+          InstanceOfPred ty1 ty2 -> quant_fun ty1 || quant_fun ty2
 
     pick_cls_pred flex_ctxt cls tys
       = tyCoVarsOfTypes tys `intersectsVarSet` qtvs
@@ -2139,6 +2140,7 @@ isImprovementPred ty
       ClassPred cls _    -> classHasFds cls
       IrredPred {}       -> True -- Might have equalities after reduction?
       ForAllPred {}      -> False
+      InstanceOfPred {}  -> False
 
 -- | Is the equality
 --        a ~r ...a....
