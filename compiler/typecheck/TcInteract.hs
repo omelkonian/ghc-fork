@@ -35,7 +35,7 @@ import TcEvidence
 import Outputable
 
 import TcRnTypes
-import TcSMonad
+import TcSMonad hiding ( newMetaTyVars )
 import Bag
 import MonadUtils ( concatMapM, foldlM )
 

@@ -97,7 +97,7 @@ module TcSMonad (
 
     -- MetaTyVars
     newFlexiTcSTy, instFlexi, instFlexiX,
-    cloneMetaTyVar, demoteUnfilledFmv,
+    cloneMetaTyVar, newMetaTyVars, demoteUnfilledFmv,
     tcInstSkolTyVarsX,
 
     TcLevel,
@@ -245,7 +245,7 @@ constraints like (a ~ b) and (a ~~ b) are actually equalities too;
 see Note [The equality types story] in TysPrim.
 
 Failing to prioritise these is inefficient (more kick-outs etc).
-But, worse, it can prevent us spotting a "recursive knot" among
+But, worse, it can prevent us from spotting a "recursive knot" among
 Wanted constraints.  See comment:10 of Trac #12734 for a worked-out
 example.
 
@@ -472,7 +472,7 @@ creating a new EvVar when we have a new goal that we have solved in
 the past.
 
 But in particular, we can use it to create *recursive* dictionaries.
-The simplest, degnerate case is
+The simplest, degenerate case is
     instance C [a] => C [a] where ...
 If we have
     [W] d1 :: C [x]
@@ -717,7 +717,7 @@ Note [EqualCtList invariants]
 
 From the fourth invariant it follows that the list is
    - A single [G], or
-   - Zero or one [D] or [WD], followd by any number of [W]
+   - Zero or one [D] or [WD], followed by any number of [W]
 
 The Wanteds can't rewrite anything which is why we put them last
 
@@ -1362,7 +1362,7 @@ maybeEmitShadow ics ct
        ; let derived_ev = CtDerived { ctev_pred = pred
                                     , ctev_loc  = loc }
              shadow_ct = ct { cc_ev = derived_ev }
-               -- Te shadow constraint keeps the canonical shape.
+               -- The shadow constraint keeps the canonical shape.
                -- This just saves work, but is sometimes important;
                -- see Note [Keep CDictCan shadows as CDictCan]
        ; emitWork [shadow_ct]
@@ -3265,6 +3265,9 @@ newFlexiTcSTy knd = wrapTcS (TcM.newFlexiTyVarTy knd)
 
 cloneMetaTyVar :: TcTyVar -> TcS TcTyVar
 cloneMetaTyVar tv = wrapTcS (TcM.cloneMetaTyVar tv)
+
+newMetaTyVars :: [TyVar] -> TcS (TCvSubst, [TcTyVar])
+newMetaTyVars = wrapTcS . TcM.newMetaTyVars
 
 instFlexi :: [TKVar] -> TcS TCvSubst
 instFlexi = instFlexiX emptyTCvSubst

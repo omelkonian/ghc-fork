@@ -1047,19 +1047,19 @@ zonkCoFn env (WpFun c1 c2 t1 d) = do { (env1, c1') <- zonkCoFn env c1
                                      ; (env2, c2') <- zonkCoFn env1 c2
                                      ; t1'         <- zonkTcTypeToTypeX env2 t1
                                      ; return (env2, WpFun c1' c2' t1' d) }
-zonkCoFn env (WpCast co) = do { co' <- zonkCoToCo env co
-                              ; return (env, WpCast co') }
-zonkCoFn env (WpEvLam ev)   = do { (env', ev') <- zonkEvBndrX env ev
-                                 ; return (env', WpEvLam ev') }
-zonkCoFn env (WpEvApp arg)  = do { arg' <- zonkEvTerm env arg
-                                 ; return (env, WpEvApp arg') }
-zonkCoFn env (WpTyLam tv)   = ASSERT( isImmutableTyVar tv )
-                              do { (env', tv') <- zonkTyBndrX env tv
-                                 ; return (env', WpTyLam tv') }
-zonkCoFn env (WpTyApp ty)   = do { ty' <- zonkTcTypeToTypeX env ty
-                                 ; return (env, WpTyApp ty') }
-zonkCoFn env (WpLet bs)     = do { (env1, bs') <- zonkTcEvBinds env bs
-                                 ; return (env1, WpLet bs') }
+zonkCoFn env (WpCast co)     = do { co' <- zonkCoToCo env co
+                                  ; return (env, WpCast co') }
+zonkCoFn env (WpEvLam ev)    = do { (env', ev') <- zonkEvBndrX env ev
+                                  ; return (env', WpEvLam ev') }
+zonkCoFn env (WpEvApp arg)   = do { arg' <- zonkEvTerm env arg
+                                  ; return (env, WpEvApp arg') }
+zonkCoFn env (WpTyLam tv)    = ASSERT( isImmutableTyVar tv )
+                               do { (env', tv') <- zonkTyBndrX env tv
+                                  ; return (env', WpTyLam tv') }
+zonkCoFn env (WpTyApp ty)    = do { ty' <- zonkTcTypeToTypeX env ty
+                                  ; return (env, WpTyApp ty') }
+zonkCoFn env (WpLet bs)      = do { (env1, bs') <- zonkTcEvBinds env bs
+                                  ; return (env1, WpLet bs') }
 
 -------------------------------------------------------------------------
 zonkOverLit :: ZonkEnv -> HsOverLit GhcTcId -> TcM (HsOverLit GhcTc)
@@ -1515,6 +1515,8 @@ zonkEvTerm env (EvExpr e)
   = EvExpr <$> zonkCoreExpr env e
 zonkEvTerm env (EvTypeable ty ev)
   = EvTypeable <$> zonkTcTypeToTypeX env ty <*> zonkEvTypeable env ev
+zonkEvTerm env (EvInstOf ty ev)
+  = EvInstOf <$> zonkTcTypeToTypeX env ty <*> zonkEvInstanceOf env ev
 zonkEvTerm env (EvFun { et_tvs = tvs, et_given = evs
                       , et_binds = ev_binds, et_body = body_id })
   = do { (env0, new_tvs) <- zonkTyBndrsX env tvs
@@ -1642,6 +1644,14 @@ zonkEvBind env bind@(EvBind { eb_lhs = var, eb_rhs = term })
            _other -> zonkEvTerm env term
 
        ; return (bind { eb_lhs = var', eb_rhs = term' }) }
+
+zonkEvInstanceOf :: ZonkEnv -> EvInstanceOf -> TcM EvInstanceOf
+zonkEvInstanceOf env (EvInstOfEq co)
+  = EvInstOfEq <$> zonkCoToCo env co
+zonkEvInstanceOf env (EvInstOfInst tys innerEv q)
+  = EvInstOfInst <$> mapM (zonkTcTypeToTypeX env) tys
+                 <*> return (zonkIdOcc env innerEv)
+                 <*> mapM (zonkEvTerm env) q
 
 {- Note [Optimise coercion zonking]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

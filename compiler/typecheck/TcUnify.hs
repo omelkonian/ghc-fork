@@ -2165,7 +2165,7 @@ metaTyVarUpdateOK dflags tv ty
 
 preCheck :: DynFlags -> Bool -> TcTyVar -> TcType -> OccCheckResult ()
 -- A quick check for
---   (a) a forall type (unless -XImpredivativeTypes)
+--   (a) a forall type (unless -XImpredicativeTypes)
 --   (b) a type family
 --   (c) an occurrence of the type variable (occurs check)
 --

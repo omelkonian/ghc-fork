@@ -9,6 +9,7 @@ module TcEvidence (
   (<.>), mkWpTyApps, mkWpEvApps, mkWpEvVarApps, mkWpTyLams,
   mkWpLams, mkWpLet, mkWpCastN, mkWpCastR, collectHsWrapBinders,
   mkWpFun, mkWpFuns, idHsWrapper, isIdHsWrapper, pprHsWrapper,
+  mkWpInstanceOf,
 
   -- Evidence bindings
   TcEvBinds(..), EvBindsVar(..),
@@ -26,6 +27,10 @@ module TcEvidence (
   evTermCoercion, evTermCoercion_maybe,
   EvCallStack(..),
   EvTypeable(..),
+
+  -- InstanceOf
+  EvInstanceOf(..),
+  mkInstanceOfEq, mkInstanceOfInst,
 
   -- TcCoercion
   TcCoercion, TcCoercionR, TcCoercionN, TcCoercionP, CoercionHole,
@@ -213,6 +218,8 @@ data HsWrapper
   | WpLet TcEvBinds             -- Non-empty (or possibly non-empty) evidence bindings,
                                 -- so that the identity coercion is always exactly WpHole
 
+  | WpEvInstOf EvVar     -- d []    the 'd' is evidence for an instantiation
+
 -- Cannot derive Data instance because SDoc is not Data (it stores a function).
 -- So we do it manually:
 instance Data.Data HsWrapper where
@@ -225,6 +232,7 @@ instance Data.Data HsWrapper where
   gfoldl k z (WpTyLam a1)       = z WpTyLam `k` a1
   gfoldl k z (WpTyApp a1)       = z WpTyApp `k` a1
   gfoldl k z (WpLet a1)         = z WpLet `k` a1
+  gfoldl k z (WpEvInstOf a1)    = z WpEvInstOf `k` a1
 
   gunfold k z c = case Data.constrIndex c of
                     1 -> z WpHole
@@ -246,6 +254,7 @@ instance Data.Data HsWrapper where
   toConstr (WpTyLam _)     = wpTyLam_constr
   toConstr (WpTyApp _)     = wpTyApp_constr
   toConstr (WpLet _)       = wpLet_constr
+  toConstr (WpEvInstOf _)  = wpEvInstOf_constr
 
   dataTypeOf _ = hsWrapper_dataType
 
@@ -254,19 +263,20 @@ hsWrapper_dataType
   = Data.mkDataType "HsWrapper"
       [ wpHole_constr, wpCompose_constr, wpFun_constr, wpCast_constr
       , wpEvLam_constr, wpEvApp_constr, wpTyLam_constr, wpTyApp_constr
-      , wpLet_constr]
+      , wpLet_constr, wpEvInstOf_constr]
 
 wpHole_constr, wpCompose_constr, wpFun_constr, wpCast_constr, wpEvLam_constr,
-  wpEvApp_constr, wpTyLam_constr, wpTyApp_constr, wpLet_constr :: Data.Constr
-wpHole_constr    = mkHsWrapperConstr "WpHole"
-wpCompose_constr = mkHsWrapperConstr "WpCompose"
-wpFun_constr     = mkHsWrapperConstr "WpFun"
-wpCast_constr    = mkHsWrapperConstr "WpCast"
-wpEvLam_constr   = mkHsWrapperConstr "WpEvLam"
-wpEvApp_constr   = mkHsWrapperConstr "WpEvApp"
-wpTyLam_constr   = mkHsWrapperConstr "WpTyLam"
-wpTyApp_constr   = mkHsWrapperConstr "WpTyApp"
-wpLet_constr     = mkHsWrapperConstr "WpLet"
+  wpEvApp_constr, wpTyLam_constr, wpTyApp_constr, wpLet_constr, wpEvInstOf_constr :: Data.Constr
+wpHole_constr     = mkHsWrapperConstr "WpHole"
+wpCompose_constr  = mkHsWrapperConstr "WpCompose"
+wpFun_constr      = mkHsWrapperConstr "WpFun"
+wpCast_constr     = mkHsWrapperConstr "WpCast"
+wpEvLam_constr    = mkHsWrapperConstr "WpEvLam"
+wpEvApp_constr    = mkHsWrapperConstr "WpEvApp"
+wpTyLam_constr    = mkHsWrapperConstr "WpTyLam"
+wpTyApp_constr    = mkHsWrapperConstr "WpTyApp"
+wpLet_constr      = mkHsWrapperConstr "WpLet"
+wpEvInstOf_constr = mkHsWrapperConstr "WpEvInstOf"
 
 mkHsWrapperConstr :: String -> Data.Constr
 mkHsWrapperConstr name = Data.mkConstr hsWrapper_dataType name [] Data.Prefix
@@ -338,6 +348,9 @@ mkWpLet :: TcEvBinds -> HsWrapper
 -- This no-op is a quite a common case
 mkWpLet (EvBinds b) | isEmptyBag b = WpHole
 mkWpLet ev_binds                   = WpLet ev_binds
+
+mkWpInstanceOf :: EvVar -> HsWrapper
+mkWpInstanceOf v = WpEvInstOf v
 
 mk_co_lam_fn :: (a -> HsWrapper) -> [a] -> HsWrapper
 mk_co_lam_fn f as = foldr (\x wrap -> f x <.> wrap) WpHole as
@@ -527,6 +540,8 @@ data EvTerm
                               -- constructor, and can't just use EvExpr
       , et_body  :: EvVar }
 
+  | EvInstOf Type EvInstanceOf   -- Evidence for s1 <~ s2
+
   deriving Data.Data
 
 type EvExpr = CoreExpr
@@ -594,6 +609,38 @@ data EvCallStack
     -- ^ @EvCsPushCall name loc stk@ represents a call to @name@, occurring at
     -- @loc@, in a calling context @stk@.
   deriving Data.Data
+
+
+{-
+Note [Evidence for InstanceOf constraints]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+           g : s ~N t
+  --------------------------
+  EvInstOfEq g : s <~ t
+
+
+               g : (s[tys/as] <~ t),   vi : ci[tys/as]
+  ---------------------------------------------------------------------------
+  EvInstOfInst [t1..tm] g [v1..vn] : (forall a1..am., c1..ck => s) <~ t
+
+-}
+data EvInstanceOf
+  = EvInstOfEq TcCoercion -- ^ a single coercion (when converting to `~`)
+
+  | EvInstOfInst [Type]   -- ^ type variables to apply
+                 EvVar    -- ^ witness for inner (<~)
+                 [EvTerm] -- ^ witness for inner constraints
+    deriving ( Data.Data, Data.Typeable )
+
+mkInstanceOfEq :: Type -> TcCoercion -> EvTerm
+mkInstanceOfEq ty co
+  = EvInstOf ty (EvInstOfEq co)
+
+mkInstanceOfInst :: Type -> [Type] -> EvVar -> [EvVar] -> EvTerm
+mkInstanceOfInst ty vars co q
+  = EvInstOf ty (EvInstOfInst vars co (map (EvExpr . evId) q))
+
 
 {-
 Note [Typeable evidence terms]
@@ -851,6 +898,7 @@ evVarsOfTerm :: EvTerm -> VarSet
 evVarsOfTerm (EvExpr e)         = exprSomeFreeVars isEvVar e
 evVarsOfTerm (EvTypeable _ ev)  = evVarsOfTypeable ev
 evVarsOfTerm (EvFun {})         = emptyVarSet -- See Note [Free vars of EvFun]
+evVarsOfTerm (EvInstOf _ ev)    = evVarsOfInstanceOf ev
 
 evVarsOfTerms :: [EvTerm] -> VarSet
 evVarsOfTerms = mapUnionVarSet evVarsOfTerm
@@ -863,6 +911,11 @@ evVarsOfTypeable ev =
     EvTypeableTrFun e1 e2 -> evVarsOfTerms [e1,e2]
     EvTypeableTyLit e     -> evVarsOfTerm e
 
+evVarsOfInstanceOf :: EvInstanceOf -> VarSet
+evVarsOfInstanceOf (EvInstOfEq co)
+  = coVarsOfTcCo co
+evVarsOfInstanceOf (EvInstOfInst _ innerEv q)
+  = unitUniqSet innerEv `unionVarSet` evVarsOfTerms q
 
 {- Note [Free vars of EvFun]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -905,7 +958,8 @@ pprHsWrapper wrap pp_thing_inside
     help it (WpCompose f1 f2)  = help (help it f2) f1
     help it (WpFun f1 f2 t1 _) = add_parens $ text "\\(x" <> dcolon <> ppr t1 <> text ")." <+>
                                               help (\_ -> it True <+> help (\_ -> text "x") f1 True) f2 False
-    help it (WpCast co)   = add_parens $ sep [it False, nest 2 (text "|>"
+    help it (WpEvInstOf id) = no_parens  $ sep [it False, text "<|", nest 2 (ppr id)]
+    help it (WpCast co)     = add_parens $ sep [it False, nest 2 (text "|>"
                                               <+> pprParendCo co)]
     help it (WpEvApp id)  = no_parens  $ sep [it True, nest 2 (ppr id)]
     help it (WpTyApp ty)  = no_parens  $ sep [it True, text "@" <+> pprParendType ty]
@@ -948,6 +1002,7 @@ instance Outputable EvTerm where
   ppr (EvFun { et_tvs = tvs, et_given = gs, et_binds = bs, et_body = w })
       = hang (text "\\" <+> sep (map pprLamBndr (tvs ++ gs)) <+> arrow)
            2 (ppr bs $$ ppr w)   -- Not very pretty
+  ppr (EvInstOf ty ev)   = ppr ev <+> dcolon <+> text "InstOf" <+> ppr ty
 
 instance Outputable EvCallStack where
   ppr EvCsEmpty
@@ -961,6 +1016,11 @@ instance Outputable EvTypeable where
   ppr (EvTypeableTrFun t1 t2) = parens (ppr t1 <+> arrow <+> ppr t2)
   ppr (EvTypeableTyLit t1)    = text "TyLit" <> ppr t1
 
+instance Outputable EvInstanceOf where
+  ppr (EvInstOfEq co)
+    = text "EvInstOfEq" <+> ppr co
+  ppr (EvInstOfInst vars co q)
+    = text "EvInstOfInst" <+> ppr vars <+> ppr q <+> ppr co
 
 ----------------------------------------------------------------------
 -- Helper functions for dealing with IP newtype-dictionaries

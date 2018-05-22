@@ -66,7 +66,7 @@ Constraints originating from user-written code come into being as
 CNonCanonicals (except for CHoleCans, arising from holes). We know nothing
 about these constraints. So, first:
 
-     Classify CNonCanoncal constraints, depending on whether they
+     Classify CNonCanonical constraints, depending on whether they
      are equalities, class predicates, or other.
 
 Then proceed depending on the shape of the constraint. Generally speaking,
@@ -94,8 +94,8 @@ canonicalize (CNonCanonical { cc_ev = ev })
                                    canIrred ev
       ForAllPred _ _ pred    -> do traceTcS "canEvNC:forall" (ppr pred)
                                    canForAll ev (isClassPred pred)
-      InstanceOfPred ty1 ty2 -> do traceTcS "canEvNC:inst" (ppr ty1 $$ ppr ty2)
-                                   canInstanceOfNC ev
+      InstanceOfPred ty1 ty2 -> do traceTcS "canEvNC:inst" (ppr ty1 $$ ppr ty2 $$ ppr ev)
+                                   canInstanceOfNC ev ty1 ty2
   where
     pred = ctEvPred ev
 
@@ -138,8 +138,8 @@ canonicalize (CFunEqCan { cc_ev = ev
 canonicalize (CHoleCan { cc_ev = ev, cc_hole = hole })
   = canHole ev hole
 
-canonicalize (CInstanceOfCan { cc_ev = ev })
-  = canInstanceOfNC ev
+canonicalize (CInstanceOfCan { cc_ev = ev, cc_lhs = lhs, cc_rhs = rhs })
+  = canInstanceOfNC ev lhs rhs
 
 {-
 ************************************************************************
@@ -650,10 +650,11 @@ canIrred ev
        ; rewriteEvidence ev xi co `andWhenContinue` \ new_ev ->
     do { -- Re-classify, in case flattening has improved its shape
        ; case classifyPredType (ctEvPred new_ev) of
-           ClassPred cls tys     -> canClassNC new_ev cls tys
-           EqPred eq_rel ty1 ty2 -> canEqNC new_ev eq_rel ty1 ty2
-           _                     -> continueWith $
-                                    mkIrredCt new_ev } }
+           ClassPred cls tys      -> canClassNC new_ev cls tys
+           EqPred eq_rel ty1 ty2  -> canEqNC new_ev eq_rel ty1 ty2
+           InstanceOfPred ty1 ty2 -> canInstanceOfNC new_ev ty1 ty2
+           _                      -> continueWith $
+                                     mkIrredCt new_ev } }
 
 canHole :: CtEvidence -> Hole -> TcS (StopOrContinue Ct)
 canHole ev hole
@@ -2476,5 +2477,68 @@ maybeSym NotSwapped co = co
 ************************************************************************
 -}
 
-canInstanceOfNC :: CtEvidence -> TcS (StopOrContinue Ct)
-canInstanceOfNC _ = panic "ToDo: canon <~"
+canInstanceOfNC :: CtEvidence -> Type -> Type -> TcS (StopOrContinue Ct)
+canInstanceOfNC ev ty1 ty2
+    -- μ <~ η ==> μ ~ η [INSTε]
+  | isRhoTy ty1 -- TODO: check mono/poly flag instead
+  = can_instance_of_eq ev ty1 ty2
+
+    -- ∀as. σ <~ η ==> inst(σ) <~ η [INST∀L]
+  | isForAllTy ty1
+  = can_instance_of_inst ev ty1 ty2
+
+    -- σ <~ η ==> KEEP in inert set
+  | otherwise
+  = do { addInertCan (CInstanceOfCan ev ty1 ty2)
+       ; stopWith ev "(<~): kept in inert set" }
+
+can_instance_of_eq :: CtEvidence -> Type -> Type -> TcS (StopOrContinue Ct)
+can_instance_of_eq ev ty1 ty2
+  | CtWanted { ctev_dest = ev_dest, ctev_loc = loc } <- ev
+    = do { traceTcS "(<~): [W] ev_dest = " (ppr ev_dest)
+         ; (new_ev, co) <- newWantedEq loc Nominal ty1 ty2
+         ; traceTcS "(<~): [W] co = " (ppr co)
+         ; setWantedEvTerm ev_dest (mkInstanceOfEq ty1 co)
+         ; canEqNC new_ev NomEq ty1 ty2 }
+
+  | isGiven ev
+    = do { emitNewDerivedEq (ctEvLoc ev) Nominal ty1 ty2
+         ; stopWith ev "(<~): [D] converted to (~)" }
+    -- Only for testing, no Givens IRL
+    -- TODO: replace with `= panic "There should be no `Given` (<~) constraint"`
+
+  | otherwise -- Derived (<~) turn to derived (~)
+    = do { emitNewDerivedEq (ctEvLoc ev) Nominal ty1 ty2
+         ; stopWith ev "(<~): [D] converted to (~)" }
+
+can_instance_of_inst :: CtEvidence
+                     -> Type -- ^ ∀α. Q => ty1'
+                     -> Type -- ^ ty2
+                     -> TcS (StopOrContinue Ct)
+can_instance_of_inst ev ty1 ty2
+  | CtWanted { ctev_dest = ev_dest, ctev_loc = loc } <- ev
+    = do { traceTcS "(<~)*: [W] ev_dest = " (ppr ev_dest)
+         ; let (vars, q, ty1') = tcSplitSigmaTy ty1
+
+           -- generate new meta variables
+         ; (subst, inst_vars) <- newMetaTyVars vars
+         ; let vars' = mkTyVarTys inst_vars
+
+           -- instantiate θ and ty1
+         ; let ty1_inst : q_inst = substTy subst <$> ty1' : q
+
+           -- θ[as'/as]
+         ; q' <- mapM (newWantedNC loc) q_inst
+         ; emitWorkNC q'
+
+           -- ty1[as'/as] <~ ty2
+         ; innerEv <- newWantedNC loc (mkInstanceOfPred ty1_inst ty2)
+
+           -- construct evidence for top-level
+         ; setWantedEvTerm ev_dest
+              (mkInstanceOfInst ty1 vars' (ctEvEvId innerEv) (ctEvEvId <$> q'))
+
+         ; canInstanceOfNC innerEv ty1_inst ty2 }
+
+  | otherwise
+    = stopWith ev "(<~)*: [GD] stop"
