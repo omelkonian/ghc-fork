@@ -1568,7 +1568,7 @@ But there are a number of complications:
   printing during type checking of not-fully-zonked types.  So it's
   not cool to say isConstraintKind (typeKind ty) because, absent
   zonking, the type might be ill-kinded, and typeKind crashes. Hence the
-  rather tiresome story here
+  rather tiresome story here.
 
 * isPredTy must return "True" to *unlifted* coercions, such as (t1 ~# t2)
   and (t1 ~R# t2), which are not of kind Constraint!  Currently they are

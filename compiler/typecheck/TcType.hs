@@ -38,14 +38,14 @@ module TcType (
   -- MetaDetails
   UserTypeCtxt(..), pprUserTypeCtxt, isSigMaybe,
   TcTyVarDetails(..), pprTcTyVarDetails, vanillaSkolemTv, superSkolemTv,
-  MetaDetails(Flexi, Indirect), MetaInfo(..),
+  MetaDetails(Flexi, Indirect), MetaInfo(..), TcFlavor(..),
   isImmutableTyVar, isSkolemTyVar, isMetaTyVar,  isMetaTyVarTy, isTyVarTy,
   isTyVarTyVar, isOverlappableTyVar,  isTyConableTyVar,
   isFskTyVar, isFmvTyVar, isFlattenTyVar,
   isAmbiguousTyVar, metaTyVarRef, metaTyVarInfo,
   isFlexi, isIndirect, isRuntimeUnkSkol,
   metaTyVarTcLevel, setMetaTyVarTcLevel, metaTyVarTcLevel_maybe,
-  isTouchableMetaTyVar,
+  isTouchableMetaTyVar, metaTyVarFlavor, metaTyVarFlavor_maybe,
   isFloatedTouchableMetaTyVar,
   findDupTyVarTvs, mkTyVarNamePairs,
 
@@ -76,7 +76,7 @@ module TcType (
   -- Again, newtypes are opaque
   eqType, eqTypes, nonDetCmpType, nonDetCmpTypes, eqTypeX,
   pickyEqType, tcEqType, tcEqKind, tcEqTypeNoKindCheck, tcEqTypeVis,
-  isSigmaTy, isRhoTy, isRhoExpTy, isOverloadedTy,
+  isMonoTyVar, isPolyTyVar, isSigmaTy, isRhoTy, isRhoExpTy, isOverloadedTy,
   isFloatingTy, isDoubleTy, isFloatTy, isIntTy, isWordTy, isStringTy,
   isIntegerTy, isBoolTy, isUnitTy, isCharTy, isCallStackTy, isCallStackPred,
   hasIPPred, isTauTy, isTauTyCon, tcIsTyVarTy, tcIsForAllTy,
@@ -434,10 +434,13 @@ mkSynFunTys arg_tys res_ty = foldr SynFun (SynType res_ty) arg_tys
 Note [TcRhoType]
 ~~~~~~~~~~~~~~~~
 A TcRhoType has no foralls or contexts at the top, or to the right of an arrow
+and it is not a TyVar with TcFlavor 'Poly'.
   YES    (forall a. a->a) -> Int
   NO     forall a. a ->  Int
   NO     Eq a => a -> a
   NO     Int -> forall a. a -> Int
+  YES    a:mono
+  NO     a:poly
 
 
 ************************************************************************
@@ -507,9 +510,10 @@ data TcTyVarDetails
   | RuntimeUnk    -- Stands for an as-yet-unknown type in the GHCi
                   -- interactive context
 
-  | MetaTv { mtv_info  :: MetaInfo
-           , mtv_ref   :: IORef MetaDetails
-           , mtv_tclvl :: TcLevel }  -- See Note [TcLevel and untouchable type variables]
+  | MetaTv { mtv_info   :: MetaInfo
+           , mtv_flavor :: TcFlavor
+           , mtv_ref    :: IORef MetaDetails
+           , mtv_tclvl  :: TcLevel }  -- See Note [TcLevel and untouchable type variables]
 
 vanillaSkolemTv, superSkolemTv :: TcTyVarDetails
 -- See Note [Binding when looking up instances] in InstEnv
@@ -542,24 +546,29 @@ data MetaInfo
                    -- It is filled in /only/ by unflattenGivens
                    -- See Note [The flattening story] in TcFlatten
 
+data TcFlavor = Mono | Poly deriving Eq
+
 instance Outputable MetaDetails where
   ppr Flexi         = text "Flexi"
   ppr (Indirect ty) = text "Indirect" <+> ppr ty
+
+instance Outputable TcFlavor where
+  ppr Mono = text "mono"
+  ppr Poly = text "poly"
 
 pprTcTyVarDetails :: TcTyVarDetails -> SDoc
 -- For debugging
 pprTcTyVarDetails (RuntimeUnk {})      = text "rt"
 pprTcTyVarDetails (SkolemTv lvl True)  = text "ssk" <> colon <> ppr lvl
 pprTcTyVarDetails (SkolemTv lvl False) = text "sk"  <> colon <> ppr lvl
-pprTcTyVarDetails (MetaTv { mtv_info = info, mtv_tclvl = tclvl })
-  = pp_info <> colon <> ppr tclvl
+pprTcTyVarDetails (MetaTv { mtv_info = info, mtv_flavor = flav, mtv_tclvl = tclvl })
+  = pp_info <> colon <> ppr tclvl <+> ppr flav
   where
     pp_info = case info of
                 TauTv      -> text "tau"
                 TyVarTv    -> text "tyv"
                 FlatMetaTv -> text "fmv"
                 FlatSkolTv -> text "fsk"
-
 
 {- *********************************************************************
 *                                                                      *
@@ -1274,16 +1283,29 @@ isMetaTyVarTy :: TcType -> Bool
 isMetaTyVarTy (TyVarTy tv) = isMetaTyVar tv
 isMetaTyVarTy _            = False
 
+isFlattenInfo :: MetaInfo -> Bool
+isFlattenInfo FlatMetaTv = True
+isFlattenInfo FlatSkolTv = True
+isFlattenInfo _          = False
+
 metaTyVarInfo :: TcTyVar -> MetaInfo
 metaTyVarInfo tv
   = case tcTyVarDetails tv of
       MetaTv { mtv_info = info } -> info
       _ -> pprPanic "metaTyVarInfo" (ppr tv)
 
-isFlattenInfo :: MetaInfo -> Bool
-isFlattenInfo FlatMetaTv = True
-isFlattenInfo FlatSkolTv = True
-isFlattenInfo _          = False
+metaTyVarFlavor :: TcTyVar -> TcFlavor
+metaTyVarFlavor tv
+  = case metaTyVarFlavor_maybe tv of
+      Just flavor -> flavor
+      _           -> pprPanic "metaTyVarFlavor" (ppr tv)
+
+metaTyVarFlavor_maybe :: TcTyVar -> Maybe TcFlavor
+metaTyVarFlavor_maybe tv
+  = ASSERT2( tcIsTcTyVar tv, ppr tv )
+    case tcTyVarDetails tv of
+      MetaTv { mtv_flavor = flavor } -> Just flavor
+      _                              -> Nothing
 
 metaTyVarTcLevel :: TcTyVar -> TcLevel
 metaTyVarTcLevel tv
@@ -2265,6 +2287,14 @@ the quantified variables.
 ************************************************************************
 -}
 
+-- Check the flavor (i.e. mono/poly) of a meta type variable.
+isMonoTyVar, isPolyTyVar :: TcTyVar -> Bool
+isPolyTyVar tv
+  = case metaTyVarFlavor_maybe tv of
+      Just Poly -> True
+      _         -> False
+isMonoTyVar tv = not (isPolyTyVar tv)
+
 isSigmaTy :: TcType -> Bool
 -- isSigmaTy returns true of any qualified type.  It doesn't
 -- *necessarily* have any foralls.  E.g
@@ -2278,6 +2308,9 @@ isRhoTy :: TcType -> Bool   -- True of TcRhoTypes; see Note [TcRhoType]
 isRhoTy ty | Just ty' <- tcView ty = isRhoTy ty'
 isRhoTy (ForAllTy {}) = False
 isRhoTy (FunTy a r)   = not (isPredTy a) && isRhoTy r
+isRhoTy (TyVarTy tv)
+  | isMetaTyVar, isPolyTyVar tv
+  = True
 isRhoTy _             = True
 
 -- | Like 'isRhoTy', but also says 'True' for 'Infer' types

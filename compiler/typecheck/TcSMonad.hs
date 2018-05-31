@@ -3090,7 +3090,7 @@ zonkTyCoVarsAndFVList :: [TcTyCoVar] -> TcS [TcTyCoVar]
 zonkTyCoVarsAndFVList tvs = wrapTcS (TcM.zonkTyCoVarsAndFVList tvs)
 
 zonkCo :: Coercion -> TcS Coercion
-zonkCo = wrapTcS . TcM.zonkCo
+zonkCo co = wrapTcS (TcM.zonkCo co)
 
 zonkTcType :: TcType -> TcS TcType
 zonkTcType ty = wrapTcS (TcM.zonkTcType ty)
@@ -3267,7 +3267,7 @@ cloneMetaTyVar :: TcTyVar -> TcS TcTyVar
 cloneMetaTyVar tv = wrapTcS (TcM.cloneMetaTyVar tv)
 
 newMetaTyVars :: [TyVar] -> TcS (TCvSubst, [TcTyVar])
-newMetaTyVars = wrapTcS . TcM.newMetaTyVars
+newMetaTyVars tvs = wrapTcS (TcM.newMetaTyVars tvs)
 
 instFlexi :: [TKVar] -> TcS TCvSubst
 instFlexi = instFlexiX emptyTCvSubst

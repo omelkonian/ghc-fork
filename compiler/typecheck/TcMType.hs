@@ -590,9 +590,10 @@ newFskTyVar fam_ty
   = do { uniq <- newUnique
        ; ref  <- newMutVar Flexi
        ; tclvl <- getTcLevel
-       ; let details = MetaTv { mtv_info  = FlatSkolTv
-                              , mtv_ref   = ref
-                              , mtv_tclvl = tclvl }
+       ; let details = MetaTv { mtv_info   = FlatSkolTv
+                              , mtv_flavor = Mono
+                              , mtv_ref    = ref
+                              , mtv_tclvl  = tclvl }
              name = mkMetaTyVarName uniq (fsLit "fsk")
        ; return (mkTcTyVar name (typeKind fam_ty) details) }
 
@@ -662,9 +663,10 @@ newFmvTyVar fam_ty
   = do { uniq <- newUnique
        ; ref  <- newMutVar Flexi
        ; tclvl <- getTcLevel
-       ; let details = MetaTv { mtv_info  = FlatMetaTv
-                              , mtv_ref   = ref
-                              , mtv_tclvl = tclvl }
+       ; let details = MetaTv { mtv_info   = FlatMetaTv
+                              , mtv_flavor = Mono
+                              , mtv_ref    = ref
+                              , mtv_tclvl  = tclvl }
              name = mkMetaTyVarName uniq (fsLit "s")
        ; return (mkTcTyVar name (typeKind fam_ty) details) }
 
@@ -673,6 +675,7 @@ newMetaDetails info
   = do { ref <- newMutVar Flexi
        ; tclvl <- getTcLevel
        ; return (MetaTv { mtv_info = info
+                        , mtv_flavor = Mono
                         , mtv_ref = ref
                         , mtv_tclvl = tclvl }) }
 
@@ -946,6 +949,7 @@ newMetaTyVarTyAtLevel tc_lvl kind
         ; ref  <- newMutVar Flexi
         ; let name = mkMetaTyVarName uniq (fsLit "p")
               details = MetaTv { mtv_info  = TauTv
+                               , mtv_flavor = Mono
                                , mtv_ref   = ref
                                , mtv_tclvl = tc_lvl }
         ; return (mkTyVarTy (mkTcTyVar name kind details)) }
