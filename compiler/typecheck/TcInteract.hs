@@ -2101,7 +2101,7 @@ we do *not* need to expand type synonyms because the matcher will do that for us
 Note [Improvement orientation]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 A very delicate point is the orientation of derived equalities
-arising from injectivity improvement (Trac #12522).  Suppse we have
+arising from injectivity improvement (Trac #12522).  Suppose we have
   type family F x = t | t -> x
   type instance F (a, Int) = (Int, G a)
 where G is injective; and wanted constraints
@@ -2123,7 +2123,7 @@ so that the fresh unification variable will be eliminated in
 favour of alpha.  If we instead had
    [D] alpha ~ gamma1
 then we would unify alpha := gamma1; and kick out the wanted
-constraint.  But when we grough it back in, it'd look like
+constraint.  But when we brought it back in, it'd look like
    [W] TF (gamma1, beta) ~ fuv
 and exactly the same thing would happen again!  Infinite loop.
 
@@ -2131,7 +2131,7 @@ This all seems fragile, and it might seem more robust to avoid
 introducing gamma1 in the first place, in the case where the
 actual argument (alpha, beta) partly matches the improvement
 template.  But that's a bit tricky, esp when we remember that the
-kinds much match too; so it's easier to let the normal machinery
+kinds must match too; so it's easier to let the normal machinery
 handle it.  Instead we are careful to orient the new derived
 equality with the template on the left.  Delicate, but it works.
 

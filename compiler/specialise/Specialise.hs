@@ -2010,9 +2010,10 @@ mkCallUDs' env f args
             ClassPred cls _   -> not (isIPClass cls)  -- Superclasses can't be IPs
             EqPred {}         -> True
             InstanceOfPred {} -> True
+            GenOfPred {}      -> True
             IrredPred {}      -> True   -- Things like (D []) where D is a
                                       -- Constraint-ranged family; Trac #7785
-            ForAllPred {}   -> True
+            ForAllPred {}     -> True
 
 {-
 Note [Type determines value]

@@ -38,4 +38,4 @@ anyTypeOfKind :: Kind -> Type
 unboxedTupleKind :: [Type] -> Type
 mkPromotedListTy :: Type -> [Type] -> Type
 
-instanceOfTyCon :: TyCon
+instanceOfTyCon, genOfTyCon :: TyCon

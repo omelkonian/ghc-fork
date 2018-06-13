@@ -38,7 +38,7 @@ module TcType (
   -- MetaDetails
   UserTypeCtxt(..), pprUserTypeCtxt, isSigMaybe,
   TcTyVarDetails(..), pprTcTyVarDetails, vanillaSkolemTv, superSkolemTv,
-  MetaDetails(Flexi, Indirect), MetaInfo(..), TcFlavor(..),
+  MetaDetails(Flexi, Indirect), MetaInfo(..), TcFlavour(..),
   isImmutableTyVar, isSkolemTyVar, isMetaTyVar,  isMetaTyVarTy, isTyVarTy,
   isTyVarTyVar, isOverlappableTyVar,  isTyConableTyVar,
   isFskTyVar, isFmvTyVar, isFlattenTyVar,
@@ -48,6 +48,7 @@ module TcType (
   isTouchableMetaTyVar, metaTyVarFlavor, metaTyVarFlavor_maybe,
   isFloatedTouchableMetaTyVar,
   findDupTyVarTvs, mkTyVarNamePairs,
+  mkInstanceOfPred, mkGenOfPred, reifyGenFlags,
 
   --------------------------------
   -- Builders
@@ -215,7 +216,7 @@ import NameSet
 import VarEnv
 import PrelNames
 import TysWiredIn( coercibleClass, unitTyCon, unitTyConKey
-                 , listTyCon, constraintKind )
+                 , listTyCon, constraintKind, instanceOfTyCon, genOfTyCon )
 import BasicTypes
 import Util
 import Maybes
@@ -434,7 +435,7 @@ mkSynFunTys arg_tys res_ty = foldr SynFun (SynType res_ty) arg_tys
 Note [TcRhoType]
 ~~~~~~~~~~~~~~~~
 A TcRhoType has no foralls or contexts at the top, or to the right of an arrow
-and it is not a TyVar with TcFlavor 'Poly'.
+and it is not a TyVar with TcFlavour 'Poly'.
   YES    (forall a. a->a) -> Int
   NO     forall a. a ->  Int
   NO     Eq a => a -> a
@@ -511,7 +512,7 @@ data TcTyVarDetails
                   -- interactive context
 
   | MetaTv { mtv_info   :: MetaInfo
-           , mtv_flavor :: TcFlavor
+           , mtv_flavor :: TcFlavour
            , mtv_ref    :: IORef MetaDetails
            , mtv_tclvl  :: TcLevel }  -- See Note [TcLevel and untouchable type variables]
 
@@ -546,13 +547,13 @@ data MetaInfo
                    -- It is filled in /only/ by unflattenGivens
                    -- See Note [The flattening story] in TcFlatten
 
-data TcFlavor = Mono | Poly deriving Eq
+data TcFlavour = Mono | Poly deriving Eq
 
 instance Outputable MetaDetails where
   ppr Flexi         = text "Flexi"
   ppr (Indirect ty) = text "Indirect" <+> ppr ty
 
-instance Outputable TcFlavor where
+instance Outputable TcFlavour where
   ppr Mono = text "mono"
   ppr Poly = text "poly"
 
@@ -1294,13 +1295,13 @@ metaTyVarInfo tv
       MetaTv { mtv_info = info } -> info
       _ -> pprPanic "metaTyVarInfo" (ppr tv)
 
-metaTyVarFlavor :: TcTyVar -> TcFlavor
+metaTyVarFlavor :: TcTyVar -> TcFlavour
 metaTyVarFlavor tv
   = case metaTyVarFlavor_maybe tv of
       Just flavor -> flavor
       _           -> pprPanic "metaTyVarFlavor" (ppr tv)
 
-metaTyVarFlavor_maybe :: TcTyVar -> Maybe TcFlavor
+metaTyVarFlavor_maybe :: TcTyVar -> Maybe TcFlavour
 metaTyVarFlavor_maybe tv
   = ASSERT2( tcIsTcTyVar tv, ppr tv )
     case tcTyVarDetails tv of
@@ -1363,6 +1364,59 @@ findDupTyVarTvs prs
   where
     eq_snd (_,tv1) (_,tv2) = tv1 == tv2
     mk_result_prs ((n1,_) :| xs) = map (\(n2,_) -> (n1,n2)) xs
+
+{-
+************************************************************************
+*                                                                      *
+\subsection{InstanceOf, GenOf}
+*                                                                      *
+************************************************************************
+-}
+mkInstanceOfPred :: Type -> Type -> PredType
+mkInstanceOfPred lhs rhs
+  | not (isRhoTy rhs) = panic "mkInstanceOfPred"
+  | otherwise         = TyConApp instanceOfTyCon [lhs, rhs]
+
+mkGenOfPred :: Type -> Type -> Type -> PredType
+mkGenOfPred lhs rhs flgsTy
+  | validFlags (reifyGenFlags flgsTy) = TyConApp genOfTyCon [lhs, rhs, flgsTy]
+  | otherwise                         = panic "mkGenOfPred"
+  where
+    validFlags :: [Bool] -> Bool
+    validFlags flgs = outerBoundedVarsNo lhs >= length flgs
+
+    outerBoundedVarsNo :: Type -> Int
+    outerBoundedVarsNo = length . fst . tcSplitPiTys
+
+reifyGenFlags :: Type -> [Bool]
+reifyGenFlags ty
+  | (tyCon, _:b:tys) <- splitTyConApp ty
+  , tyCon `promotedHasKey` consDataConKey
+  =  reifyBool b : concatMap reifyGenFlags tys
+  | (tyCon, _) <- splitTyConApp ty
+  , tyCon `promotedHasKey` nilDataConKey
+  = []
+  | otherwise
+  = panic "refineGenFlags"
+
+reifyBool :: Type -> Bool
+reifyBool ty
+  | Just tyCon <- tyConAppTyCon_maybe ty
+  , tyCon `promotedHasKey` trueDataConKey
+  = True
+  | Just tyCon <- tyConAppTyCon_maybe ty
+  , tyCon `promotedHasKey` falseDataConKey
+  = False
+  | otherwise
+  = panic "reifyBool"
+
+promotedHasKey :: TyCon -> Unique -> Bool
+promotedHasKey tyCon key
+  | Just dc <- isPromotedDataCon_maybe tyCon
+  , dc `hasKey` key
+  = True
+  | otherwise
+  = False
 
 {-
 ************************************************************************
@@ -2056,6 +2110,7 @@ pickQuantifiablePreds qtvs theta
           IrredPred ty           -> tyCoVarsOfType ty `intersectsVarSet` qtvs
           ForAllPred {}          -> False
           InstanceOfPred ty1 ty2 -> quant_fun ty1 || quant_fun ty2
+          GenOfPred ty1 ty2 _    -> quant_fun ty1 || quant_fun ty2
 
     pick_cls_pred flex_ctxt cls tys
       = tyCoVarsOfTypes tys `intersectsVarSet` qtvs
@@ -2163,6 +2218,7 @@ isImprovementPred ty
       IrredPred {}       -> True -- Might have equalities after reduction?
       ForAllPred {}      -> False
       InstanceOfPred {}  -> False
+      GenOfPred {}       -> False
 
 -- | Is the equality
 --        a ~r ...a....
@@ -2293,7 +2349,10 @@ isPolyTyVar tv
   = case metaTyVarFlavor_maybe tv of
       Just Poly -> True
       _         -> False
-isMonoTyVar tv = not (isPolyTyVar tv)
+isMonoTyVar tv
+  = case metaTyVarFlavor_maybe tv of
+      Just Mono -> True
+      _         -> False
 
 isSigmaTy :: TcType -> Bool
 -- isSigmaTy returns true of any qualified type.  It doesn't
@@ -2309,8 +2368,8 @@ isRhoTy ty | Just ty' <- tcView ty = isRhoTy ty'
 isRhoTy (ForAllTy {}) = False
 isRhoTy (FunTy a r)   = not (isPredTy a) && isRhoTy r
 isRhoTy (TyVarTy tv)
-  | isMetaTyVar, isPolyTyVar tv
-  = True
+  | isMetaTyVar tv, isPolyTyVar tv
+  = False
 isRhoTy _             = True
 
 -- | Like 'isRhoTy', but also says 'True' for 'Infer' types

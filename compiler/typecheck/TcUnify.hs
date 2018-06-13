@@ -749,7 +749,7 @@ tc_sub_type_ds eq_orig inst_orig ctxt ty_actual ty_expected
     -- Historical note (Sept 16): there was a case here for
     --    go ty_a (TyVarTy alpha)
     -- which, in the impredicative case unified  alpha := ty_a
-    -- where th_a is a polytype.  Not only is this probably bogus (we
+    -- where ty_a is a polytype.  Not only is this probably bogus (we
     -- simply do not have decent story for impredicative types), but it
     -- caused Trac #12616 because (also bizarrely) 'deriving' code had
     -- -XImpredicativeTypes on.  I deleted the entire case.
@@ -1660,6 +1660,10 @@ uUnfilledVar2 origin t_or_k swapped tv1 ty2
 
 swapOverTyVars :: TcTyVar -> TcTyVar -> Bool
 swapOverTyVars tv1 tv2
+  -- Mono/poly flavour: See Note [T0D0: Mono/Poly TyVar orientation]
+  | Just Mono <- metaTyVarFlavor_maybe tv1
+  , Just Poly <- metaTyVarFlavor_maybe tv2 = True
+
   -- Level comparison: see Note [TyVar/TyVar orientation]
   | lvl1 `strictlyDeeperThan` lvl2 = False
   | lvl2 `strictlyDeeperThan` lvl1 = True
@@ -2226,6 +2230,7 @@ canUnifyWithPolyType :: DynFlags -> TcTyVarDetails -> Bool
 canUnifyWithPolyType dflags details
   = case details of
       MetaTv { mtv_info = TyVarTv }    -> False
-      MetaTv { mtv_info = TauTv }      -> xopt LangExt.ImpredicativeTypes dflags
+      MetaTv { mtv_info = TauTv, mtv_flavor = flavor }
+        -> xopt LangExt.ImpredicativeTypes dflags && flavor == Poly
       _other                           -> True
           -- We can have non-meta tyvars in given constraints

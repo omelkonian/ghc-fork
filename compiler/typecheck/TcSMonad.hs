@@ -97,7 +97,7 @@ module TcSMonad (
 
     -- MetaTyVars
     newFlexiTcSTy, instFlexi, instFlexiX,
-    cloneMetaTyVar, newMetaTyVars, demoteUnfilledFmv,
+    cloneMetaTyVar, newMetaTyVars, newMetaTyVarsWithFlags, demoteUnfilledFmv,
     tcInstSkolTyVarsX,
 
     TcLevel,
@@ -2239,7 +2239,6 @@ removeInertCt is ct =
     CIrredCan {}      -> panic "removeInertCt: CIrredEvCan"
     CNonCanonical {}  -> panic "removeInertCt: CNonCanonical"
     CHoleCan {}       -> panic "removeInertCt: CHoleCan"
-    CInstanceOfCan {} -> panic "removeInertCt: CInstanceOfCan"
 
 
 lookupFlatCache :: TyCon -> [Type] -> TcS (Maybe (TcCoercion, TcType, CtFlavour))
@@ -2870,7 +2869,7 @@ checkConstraintsTcS :: SkolemInfo
                     -> TcS (result, Cts)
                     -> TcS (result, TcEvBinds)
 -- Just like checkConstraintsTcS, but
---   - In the TcS monnad
+--   - In the TcS monad
 --   - The thing-inside should not put things in the work-list
 --     Instead, it returns the Wanted constraints it needs
 --   - I did not bother to put in the fast-path for
@@ -3268,6 +3267,9 @@ cloneMetaTyVar tv = wrapTcS (TcM.cloneMetaTyVar tv)
 
 newMetaTyVars :: [TyVar] -> TcS (TCvSubst, [TcTyVar])
 newMetaTyVars tvs = wrapTcS (TcM.newMetaTyVars tvs)
+
+newMetaTyVarsWithFlags :: [(TyVar, TcFlavour)] -> TcS (TCvSubst, [TcTyVar])
+newMetaTyVarsWithFlags tvs = wrapTcS (TcM.newMetaTyVarsWithFlags tvs)
 
 instFlexi :: [TKVar] -> TcS TCvSubst
 instFlexi = instFlexiX emptyTCvSubst

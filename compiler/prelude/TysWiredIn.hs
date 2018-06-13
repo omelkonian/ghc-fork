@@ -99,6 +99,7 @@ module TysWiredIn (
         eqTyCon, eqTyConName, eqClass, eqDataCon, eqTyCon_RDR,
         coercibleTyCon, coercibleTyConName, coercibleDataCon, coercibleClass,
         instanceOfTyCon, instanceOfDataCon, instanceOfNewtypeAxiom,
+        genOfTyCon, genOfDataCon, genOfNewtypeAxiom,
 
         -- * RuntimeRep and friends
         runtimeRepTyCon, vecCountTyCon, vecElemTyCon,
@@ -221,6 +222,7 @@ wiredInTyCons = [ -- Units are not treated like other tuples, because then
                 , eqTyCon
                 , coercibleTyCon
                 , instanceOfTyCon
+                , genOfTyCon
                 , typeNatKindCon
                 , typeSymbolKindCon
                 , runtimeRepTyCon
@@ -246,7 +248,7 @@ mkWiredInIdName :: Module -> FastString -> Unique -> Id -> Name
 mkWiredInIdName mod fs uniq id
  = mkWiredInName mod (mkOccNameFS Name.varName fs) uniq (AnId id) UserSyntax
 
--- See Note [Kind-changing of (~), (<~) and Coercible]
+-- See Note [Kind-changing of (~), (<~), (~>) and Coercible]
 -- in libraries/ghc-prim/GHC/Types.hs
 eqTyConName, eqDataConName, eqSCSelIdName :: Name
 eqTyConName   = mkWiredInTyConName   UserSyntax gHC_TYPES (fsLit "~")   eqTyConKey   eqTyCon
@@ -263,7 +265,7 @@ heqTyConName   = mkWiredInTyConName   UserSyntax gHC_TYPES (fsLit "~~")   heqTyC
 heqDataConName = mkWiredInDataConName UserSyntax gHC_TYPES (fsLit "HEq#") heqDataConKey heqDataCon
 heqSCSelIdName = mkWiredInIdName gHC_TYPES (fsLit "heq_sel") heqSCSelIdKey heqSCSelId
 
--- See Note [Kind-changing of (~), (<~) and Coercible]
+-- See Note [Kind-changing of (~), (<~), (~>) and Coercible]
 -- in libraries/ghc-prim/GHC/Types.hs
 coercibleTyConName, coercibleDataConName, coercibleSCSelIdName :: Name
 coercibleTyConName   = mkWiredInTyConName   UserSyntax gHC_TYPES (fsLit "Coercible")  coercibleTyConKey   coercibleTyCon
@@ -275,6 +277,12 @@ instanceOfTyConName   = mkWiredInTyConName UserSyntax gHC_TYPES (fsLit "<~") ins
 instanceOfDataConName = mkWiredInDataConName UserSyntax gHC_TYPES (fsLit "InstOf") instanceOfDataConKey instanceOfDataCon
 instanceOfAxiomName   = mkWiredInName gHC_TYPES (mkDataOccFS $ fsLit "InstOfArrow") instanceOfAxiomKey
                             (ACoAxiom (toBranchedAxiom instanceOfNewtypeAxiom)) UserSyntax
+
+genOfTyConName, genOfDataConName, genOfAxiomName :: Name
+genOfTyConName   = mkWiredInTyConName UserSyntax gHC_TYPES (fsLit "~>") genOfTyConKey genOfTyCon
+genOfDataConName = mkWiredInDataConName UserSyntax gHC_TYPES (fsLit "GenOf") genOfDataConKey genOfDataCon
+genOfAxiomName   = mkWiredInName gHC_TYPES (mkDataOccFS $ fsLit "GenOfArrow") genOfAxiomKey
+                            (ACoAxiom (toBranchedAxiom genOfNewtypeAxiom)) UserSyntax
 
 charTyConName, charDataConName, intTyConName, intDataConName :: Name
 charTyConName     = mkWiredInTyConName   UserSyntax gHC_TYPES (fsLit "Char") charTyConKey charTyCon
@@ -1011,7 +1019,7 @@ mk_sum arity = (tycon, sum_cons)
 {-
 ************************************************************************
 *                                                                      *
-              Equality/instanceOf types and classes
+              Equality/instanceOf/GenOf types and classes
 *                                                                      *
 ********************************************************************* -}
 
@@ -1022,11 +1030,11 @@ mk_sum arity = (tycon, sum_cons)
 -- necessary because the functional-dependency coverage check looks
 -- through superclasses, and (~#) is handled in that check.
 
-eqTyCon,   heqTyCon,   coercibleTyCon, instanceOfTyCon     :: TyCon
-eqClass,   heqClass,   coercibleClass                      :: Class
-eqDataCon, heqDataCon, coercibleDataCon, instanceOfDataCon :: DataCon
-eqSCSelId, heqSCSelId, coercibleSCSelId                    :: Id
-instanceOfNewtypeAxiom                                     :: CoAxiom Unbranched
+eqTyCon,   heqTyCon,   coercibleTyCon, instanceOfTyCon, genOfTyCon :: TyCon
+eqClass,   heqClass,   coercibleClass :: Class
+eqDataCon, heqDataCon, coercibleDataCon, instanceOfDataCon, genOfDataCon :: DataCon
+eqSCSelId, heqSCSelId, coercibleSCSelId :: Id
+instanceOfNewtypeAxiom, genOfNewtypeAxiom :: CoAxiom Unbranched
 
 (eqTyCon, eqClass, eqDataCon, eqSCSelId)
   = (tycon, klass, datacon, sc_sel_id)
@@ -1083,8 +1091,13 @@ instanceOfNewtypeAxiom                                     :: CoAxiom Unbranched
     sc_sel_id   = mkDictSelId coercibleSCSelIdName klass
 
 (instanceOfTyCon, instanceOfDataCon, instanceOfNewtypeAxiom)
-  = (tycon, datacon, newtypeaxiom)
+  = ( ASSERT2( tcIsConstraintKind tycon_reskind, ppr tycon_reskind ) tycon
+    , datacon
+    , newtypeaxiom
+    )
   where
+    tycon_reskind = synTyConResKind tycon
+
     name = instanceOfTyConName
     kis = [liftedTypeKind, liftedTypeKind]
     tvs@[a, b] = mkTemplateKindVars kis
@@ -1100,7 +1113,7 @@ instanceOfNewtypeAxiom                                     :: CoAxiom Unbranched
       Nothing -- C-type when using CAPI FFI :: Maybe CType
       [] -- stupid theta :: [PredType]
       (mkDataTyConRhs [instanceOfDataCon]) -- info about data constructors :: AlgTyConRhs
-      (VanillaAlgTyCon (mkPrelTyConRepName name)) -- flavour (vanila/type-family/etc...) :: AlgTyConFlav
+      (VanillaAlgTyCon (mkPrelTyConRepName name)) -- flavour (vanilla/type-family/etc...) :: AlgTyConFlav
       False -- GADT? :: Bool
     datacon = pcDataCon
       instanceOfDataConName -- :: Name
@@ -1109,6 +1122,43 @@ instanceOfNewtypeAxiom                                     :: CoAxiom Unbranched
       tycon -- :: TyCon
     newtypeaxiom = mkNewTypeCoAxiom
       instanceOfAxiomName -- :: Name
+      tycon -- :: TyCon
+      tvs -- :: [TyVar]
+      roles -- :: [Role]
+      sc_pred -- :: Type
+
+(genOfTyCon, genOfDataCon, genOfNewtypeAxiom)
+  = ( ASSERT2( tcIsConstraintKind tycon_reskind, ppr tycon_reskind ) tycon
+    , datacon
+    , newtypeaxiom
+    )
+  where
+    tycon_reskind = synTyConResKind tycon
+
+    name = genOfTyConName
+    kis = [liftedTypeKind, liftedTypeKind, mkListTy boolTy]
+    tvs@[a, b, _] = mkTemplateKindVars kis
+    sc_pred = mkTyVarTy a `mkFunTy` mkTyVarTy b
+    binders = mkTemplateAnonTyConBinders kis
+    roles = [Nominal, Nominal, Phantom]
+
+    tycon = mkAlgTyCon
+      name -- name :: Name
+      binders -- binders :: [TyConBinder]
+      constraintKind -- result kind :: Kind
+      roles --  role of each TyVar :: [Role]
+      Nothing -- C-type when using CAPI FFI :: Maybe CType
+      [] -- stupid theta :: [PredType]
+      (mkDataTyConRhs [genOfDataCon]) -- info about data constructors :: AlgTyConRhs
+      (VanillaAlgTyCon (mkPrelTyConRepName name)) -- flavour (vanilla/type-family/etc...) :: AlgTyConFlav
+      False -- GADT? :: Bool
+    datacon = pcDataCon
+      genOfDataConName -- :: Name
+      tvs -- :: [TyVar]
+      [sc_pred] -- :: [Type]
+      tycon -- :: TyCon
+    newtypeaxiom = mkNewTypeCoAxiom
+      genOfAxiomName -- :: Name
       tycon -- :: TyCon
       tvs -- :: [TyVar]
       roles -- :: [Role]

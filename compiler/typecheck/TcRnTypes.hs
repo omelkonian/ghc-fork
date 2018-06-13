@@ -67,6 +67,9 @@ module TcRnTypes(
         -- QCInst
         QCInst(..), isPendingScInst,
 
+        -- Generalisation Constraints
+        -- GenConstraint(..),
+
         -- Canonical constraints
         Xi, Ct(..), Cts, emptyCts, andCts, andManyCts, pprCts,
         singleCt, listToCts, ctsElts, consCts, snocCts, extendCtsList,
@@ -1698,19 +1701,6 @@ data Ct
         -- See Note [The flattening story] in TcFlatten
     }
 
-  | CInstanceOfCan { -- Canonical instance constraints
-       -- InstanceOf constraints are written  s1 <~ s2
-       -- pronounced "s1 is more polymorphic than s2"
-       --         or "s2 is an instance of s1"
-       -- A /canonical/ InstanceOf constraint has a tyvar the LHS
-       --    * sigma <~ tyvar
-       --
-       -- For now at least, they are always Wanted, never Given/Derived
-      cc_ev :: CtEvidence,
-      cc_lhs :: TcType,
-      cc_rhs :: TcType
-    }
-
   | CNonCanonical {        -- See Note [NonCanonical Semantics] in TcSMonad
       cc_ev  :: CtEvidence
     }
@@ -1726,6 +1716,8 @@ data Ct
       -- NB: I expect to make more of the cases in Ct
       --     look like this, with the payload in an
       --     auxiliary type
+
+------------
 
 ------------
 data QCInst  -- A much simplified version of ClsInst
@@ -1883,7 +1875,6 @@ instance Outputable Ct where
          CQuantCan (QCI { qci_pend_sc = pend_sc })
             | pend_sc   -> text "CQuantCan(psc)"
             | otherwise -> text "CQuantCan"
-         CInstanceOfCan {} -> text "CInstanceOfCan"
 
 {-
 ************************************************************************
@@ -1914,8 +1905,6 @@ tyCoFVsOfCt (CFunEqCan { cc_tyargs = tys, cc_fsk = fsk })
   = tyCoFVsOfTypes tys `unionFV` FV.unitFV fsk
                        `unionFV` tyCoFVsOfType (tyVarKind fsk)
 tyCoFVsOfCt (CDictCan { cc_tyargs = tys }) = tyCoFVsOfTypes tys
-tyCoFVsOfCt (CInstanceOfCan { cc_lhs = lhs, cc_rhs = rhs })
-  = tyCoFVsOfTypes [lhs, rhs]
 tyCoFVsOfCt ct = tyCoFVsOfType (ctPred ct)
 
 -- | Returns free variables of a bag of constraints as a non-deterministic

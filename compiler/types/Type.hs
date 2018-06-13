@@ -81,13 +81,14 @@ module Type (
         isClassPred, isEqPred, isNomEqPred,
         isIPPred, isIPPred_maybe, isIPTyCon, isIPClass,
         isCTupleClass,
-        mkInstanceOfPred, isInstanceOfPred,
+        isInstanceOfPred, isGenOfPred,
 
         -- Deconstructing predicate types
         PredTree(..), EqRel(..), eqRelRole, classifyPredType,
         getClassPredTys, getClassPredTys_maybe,
         getEqPredTys, getEqPredTys_maybe, getEqPredRole,
         getInstanceOfPredTys, getInstanceOfPredTys_maybe,
+        getGenOfPredTys, getGenOfPredTys_maybe,
         predTypeEqRel,
 
         -- ** Binders
@@ -229,8 +230,7 @@ import UniqSet
 import Class
 import TyCon
 import TysPrim
-import {-# SOURCE #-} TysWiredIn ( listTyCon, instanceOfTyCon, typeNatKind
-                                 , typeSymbolKind, liftedTypeKind )
+import {-# SOURCE #-} TysWiredIn ( listTyCon, typeNatKind, typeSymbolKind, liftedTypeKind )
 import PrelNames
 import CoAxiom
 import {-# SOURCE #-} Coercion( mkNomReflCo, mkGReflCo, mkReflCo
@@ -1685,7 +1685,9 @@ isPredTy ty = go ty []
        --    zonking, so we punt on such cases for now.  This only happens
        --    during debug-printing, so it doesn't matter.
 
-isClassPred, isEqPred, isNomEqPred, isIPPred, isInstanceOfPred :: PredType -> Bool
+isClassPred, isEqPred, isNomEqPred, isIPPred,
+    isInstanceOfPred, isGenOfPred :: PredType -> Bool
+
 isClassPred ty = case tyConAppTyCon_maybe ty of
     Just tyCon | isClassTyCon tyCon -> True
     _                               -> False
@@ -1704,6 +1706,10 @@ isIPPred ty = case tyConAppTyCon_maybe ty of
 
 isInstanceOfPred ty = case tyConAppTyCon_maybe ty of
     Just tyCon -> tyCon `hasKey` instanceOfTyConKey
+    _          -> False
+
+isGenOfPred ty = case tyConAppTyCon_maybe ty of
+    Just tyCon -> tyCon `hasKey` genOfTyConKey
     _          -> False
 
 isIPTyCon :: TyCon -> Bool
@@ -1772,9 +1778,6 @@ equalityTyCon :: Role -> TyCon
 equalityTyCon Nominal          = eqPrimTyCon
 equalityTyCon Representational = eqReprPrimTyCon
 equalityTyCon Phantom          = eqPhantPrimTyCon
-
-mkInstanceOfPred :: Type -> Type -> PredType
-mkInstanceOfPred a b = TyConApp instanceOfTyCon [a, b]
 
 -- --------------------- Dictionary types ---------------------------------
 
@@ -1846,6 +1849,10 @@ data PredTree
   | ForAllPred [TyVarBinder] [PredType] PredType
      -- ForAllPred: see Note [Quantified constraints] in TcCanonical
   | InstanceOfPred Type Type
+     -- InstanceOfPred: lhs <~ rhs
+  | GenOfPred Type Type Type
+     -- GenOfPred: (lhs ~> rhs) flags
+
   -- NB: There is no TuplePred case
   --     Tuple predicates like (Eq a, Ord b) are just treated
   --     as ClassPred, as if we had a tuple class with two superclasses
@@ -1863,6 +1870,9 @@ classifyPredType ev_ty = case splitTyConApp_maybe ev_ty of
 
     Just (tc, [ty1, ty2])
       | tc `hasKey` instanceOfTyConKey -> InstanceOfPred ty1 ty2
+
+    Just (tc, [ty1, ty2, flags])
+      | tc `hasKey` genOfTyConKey -> GenOfPred ty1 ty2 flags
 
     _ | (tvs, rho) <- splitForAllTyVarBndrs ev_ty
       , (theta, pred) <- splitFunTys rho
@@ -1925,6 +1935,19 @@ getInstanceOfPredTys_maybe ty
         | tc `hasKey` instanceOfTyConKey -> Just (ty1, ty2)
       _ -> Nothing
 
+getGenOfPredTys :: PredType -> (Type, Type, Type)
+getGenOfPredTys ty
+  = case splitTyConApp_maybe ty of
+      Just (tc, (ty1 : ty2 : flags : tys)) ->
+        ASSERT ( null tys && tc `hasKey` genOfTyConKey) (ty1, ty2, flags)
+      _ -> pprPanic "getGenOfPredTys" (ppr ty)
+
+getGenOfPredTys_maybe :: PredType -> Maybe (Type, Type, Type)
+getGenOfPredTys_maybe ty
+  = case splitTyConApp_maybe ty of
+      Just (tc, [ty1, ty2, flags])
+        | tc `hasKey` genOfTyConKey -> Just (ty1, ty2, flags)
+      _ -> Nothing
 
 {-
 %************************************************************************

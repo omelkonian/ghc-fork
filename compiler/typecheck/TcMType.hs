@@ -49,7 +49,7 @@ module TcMType (
 
   --------------------------------
   -- Instantiation
-  newMetaTyVars, newMetaTyVarX, newMetaTyVarsX,
+  newMetaTyVars, newMetaTyVarsWithFlags, newMetaTyVarX, newMetaTyVarsX,
   newMetaTyVarTyVars, newMetaTyVarTyVarX,
   newTyVarTyVar, newTauTyVar, newSkolemTyVar, newWildCardX,
   tcInstType,
@@ -259,6 +259,7 @@ predTypeOccName ty = case classifyPredType ty of
     IrredPred {}      -> mkVarOccFS (fsLit "irred")
     ForAllPred {}     -> mkVarOccFS (fsLit "df")
     InstanceOfPred {} -> mkVarOccFS (fsLit "InstanceOf")
+    GenOfPred {}      -> mkVarOccFS (fsLit "GenOf")
 
 {-
 ************************************************************************
@@ -679,6 +680,15 @@ newMetaDetails info
                         , mtv_ref = ref
                         , mtv_tclvl = tclvl }) }
 
+newMetaDetailsWithFlag :: MetaInfo -> TcFlavour -> TcM TcTyVarDetails
+newMetaDetailsWithFlag info flav
+  = do { ref <- newMutVar Flexi
+       ; tclvl <- getTcLevel
+       ; return (MetaTv { mtv_info = info
+                        , mtv_flavor = flav
+                        , mtv_ref = ref
+                        , mtv_tclvl = tclvl }) }
+
 cloneMetaTyVar :: TcTyVar -> TcM TcTyVar
 cloneMetaTyVar tv
   = ASSERT( isTcTyVar tv )
@@ -866,6 +876,17 @@ cloneAnonMetaTyVar info tv kind
         ; traceTc "cloneAnonMetaTyVar" (ppr tyvar)
         ; return tyvar }
 
+cloneAnonMetaTyVarWithFlag :: MetaInfo -> TcFlavour -> TyVar -> TcKind -> TcM TcTyVar
+-- Same as newAnonMetaTyVar, but use a supplied TyVar as the source of the print-name
+cloneAnonMetaTyVarWithFlag info flav tv kind
+  = do  { uniq    <- newUnique
+        ; details <- newMetaDetailsWithFlag info flav
+        ; let name = mkSystemName uniq (getOccName tv)
+                       -- See Note [Name of an instantiated type variable]
+              tyvar = mkTcTyVar name kind details
+        ; traceTc "cloneAnonMetaTyVarWithFlag" (ppr tyvar)
+        ; return tyvar }
+
 {- Note [Name of an instantiated type variable]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 At the moment we give a unification variable a System Name, which
@@ -908,10 +929,16 @@ newMetaTyVars = mapAccumLM newMetaTyVarX emptyTCvSubst
     -- Since the tyvars are freshly made, they cannot possibly be
     -- captured by any existing for-alls.
 
+newMetaTyVarsWithFlags :: [(TyVar, TcFlavour)] -> TcM (TCvSubst, [TcTyVar])
+newMetaTyVarsWithFlags = mapAccumLM newMetaTyVarXWithFlag emptyTCvSubst
+
 newMetaTyVarX :: TCvSubst -> TyVar -> TcM (TCvSubst, TcTyVar)
 -- Make a new unification variable tyvar whose Name and Kind come from
 -- an existing TyVar. We substitute kind variables in the kind.
 newMetaTyVarX subst tyvar = new_meta_tv_x TauTv subst tyvar
+
+newMetaTyVarXWithFlag :: TCvSubst -> (TyVar, TcFlavour) -> TcM (TCvSubst, TcTyVar)
+newMetaTyVarXWithFlag subst (tyvar, flav) = new_meta_tv_x_with_flag TauTv flav subst tyvar
 
 newMetaTyVarsX :: TCvSubst -> [TyVar] -> TcM (TCvSubst, [TcTyVar])
 -- Just like newMetaTyVars, but start with an existing substitution.
@@ -942,6 +969,14 @@ new_meta_tv_x info subst tv
       -- which does not yet take enough trouble to ensure
       -- the in-scope set is right; e.g. Trac #12785 trips
       -- if we use substTy here
+
+new_meta_tv_x_with_flag :: MetaInfo -> TcFlavour -> TCvSubst -> TyVar -> TcM (TCvSubst, TcTyVar)
+new_meta_tv_x_with_flag info flav subst tv
+  = do  { new_tv <- cloneAnonMetaTyVarWithFlag info flav tv substd_kind
+        ; let subst1 = extendTvSubstWithClone subst tv new_tv
+        ; return (subst1, new_tv) }
+  where
+    substd_kind = substTyUnchecked subst (tyVarKind tv)
 
 newMetaTyVarTyAtLevel :: TcLevel -> TcKind -> TcM TcType
 newMetaTyVarTyAtLevel tc_lvl kind

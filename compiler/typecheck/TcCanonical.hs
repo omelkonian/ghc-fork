@@ -96,6 +96,8 @@ canonicalize (CNonCanonical { cc_ev = ev })
                                    canForAll ev (isClassPred pred)
       InstanceOfPred ty1 ty2 -> do traceTcS "canEvNC:inst" (ppr ty1 $$ ppr ty2 $$ ppr ev)
                                    canInstanceOfNC ev ty1 ty2
+      GenOfPred ty1 ty2 flgs -> do traceTcS "canEvNC:gen" (ppr ty1 $$ ppr ty2 $$ ppr flgs $$ ppr ev)
+                                   canGenOfNC ev ty1 ty2 flgs
   where
     pred = ctEvPred ev
 
@@ -137,9 +139,6 @@ canonicalize (CFunEqCan { cc_ev = ev
 
 canonicalize (CHoleCan { cc_ev = ev, cc_hole = hole })
   = canHole ev hole
-
-canonicalize (CInstanceOfCan { cc_ev = ev, cc_lhs = lhs, cc_rhs = rhs })
-  = canInstanceOfNC ev lhs rhs
 
 {-
 ************************************************************************
@@ -699,7 +698,7 @@ We implement two main extensions to the design in the paper:
     Notice the 'm' in the head of the quantified constraint, not
     a class.
 
- 2. We suport superclasses to quantified constraints.
+ 2. We support superclasses to quantified constraints.
     For example (contrived):
       f :: (Ord b, forall b. Ord b => Ord (m b)) => m a -> m a -> Bool
       f x y = x==y
@@ -784,7 +783,7 @@ solveForAll ev tv_bndrs theta pred pend_sc
 
       ; setWantedEvTerm dest $
         EvFun { et_tvs = skol_tvs, et_given = given_ev_vars
-              , et_binds = ev_binds, et_body = w_id }
+              , et_binds = ev_binds, et_body = w_id   }
 
       ; stopWith ev "Wanted forall-constraint" }
 
@@ -1274,6 +1273,7 @@ can_eq_newtype_nc :: CtEvidence           -- ^ :: ty1 ~ ty2
                   -> TcType                                    -- ^ ty1
                   -> ((Bag GlobalRdrElt, TcCoercion), TcType)  -- ^ :: ty1 ~ ty1'
                   -> TcType               -- ^ ty2
+
                   -> TcType               -- ^ ty2, with type synonyms
                   -> TcS (StopOrContinue Ct)
 can_eq_newtype_nc ev swapped ty1 ((gres, co), ty1') ty2 ps_ty2
@@ -1569,7 +1569,6 @@ Conclusion:
 Is it sensible to decompose *Wanted* constraints over newtypes?  Yes!
 It's the only way we could ever prove (IO Int ~R IO Age), recalling
 that IO is a newtype.
-
 However we must be careful.  Consider
 
   type role Nt representational
@@ -2472,7 +2471,7 @@ maybeSym NotSwapped co = co
 {-
 ************************************************************************
 *                                                                      *
-                  InstancecOf Canonicalization
+                  InstanceOf Canonicalization
 *                                                                      *
 ************************************************************************
 -}
@@ -2480,65 +2479,153 @@ maybeSym NotSwapped co = co
 canInstanceOfNC :: CtEvidence -> Type -> Type -> TcS (StopOrContinue Ct)
 canInstanceOfNC ev ty1 ty2
     -- μ <~ η ==> μ ~ η [INSTε]
-  | isRhoTy ty1 -- TODO: check mono/poly flag instead
-  = can_instance_of_eq ev ty1 ty2
+  | isRhoTy ty1
+  = traceTcS "[INSTε]" (ppr ev)
+      >> can_instance_of_eq ev ty1 ty2
 
     -- ∀as. σ <~ η ==> inst(σ) <~ η [INST∀L]
   | isForAllTy ty1
-  = can_instance_of_inst ev ty1 ty2
+  = traceTcS "[INST∀L]" (ppr ev)
+      >> can_instance_of_inst ev ty1 ty2
 
-    -- σ <~ η ==> KEEP in inert set
+    -- a^u <~ η ==> KEEP inert
   | otherwise
-  = do { addInertCan (CInstanceOfCan ev ty1 ty2)
-       ; stopWith ev "(<~): kept in inert set" }
+  = do { addInertCan (CNonCanonical ev)
+       ; stopWith ev "(<~): KEEP inert" }
 
 can_instance_of_eq :: CtEvidence -> Type -> Type -> TcS (StopOrContinue Ct)
 can_instance_of_eq ev ty1 ty2
   | CtWanted { ctev_dest = ev_dest, ctev_loc = loc } <- ev
-    = do { traceTcS "(<~): [W] ev_dest = " (ppr ev_dest)
-         ; (new_ev, co) <- newWantedEq loc Nominal ty1 ty2
-         ; traceTcS "(<~): [W] co = " (ppr co)
-         ; setWantedEvTerm ev_dest (mkInstanceOfEq ty1 co)
-         ; canEqNC new_ev NomEq ty1 ty2 }
+  = do { (new_ev, co) <- newWantedEq loc Nominal ty1 ty2
+       ; setWantedEvTerm ev_dest (mkInstanceOfEq ty1 co)
+       ; canEqNC new_ev NomEq ty1 ty2 }
 
-  | isGiven ev
-    = do { emitNewDerivedEq (ctEvLoc ev) Nominal ty1 ty2
-         ; stopWith ev "(<~): [D] converted to (~)" }
-    -- Only for testing, no Givens IRL
-    -- TODO: replace with `= panic "There should be no `Given` (<~) constraint"`
-
-  | otherwise -- Derived (<~) turn to derived (~)
-    = do { emitNewDerivedEq (ctEvLoc ev) Nominal ty1 ty2
-         ; stopWith ev "(<~): [D] converted to (~)" }
+  | otherwise
+  = stopWith ev "(<~): [GD] stop"
 
 can_instance_of_inst :: CtEvidence
-                     -> Type -- ^ ∀α. Q => ty1'
-                     -> Type -- ^ ty2
+                     -> Type -- ^ ∀α. Q => σ
+                     -> Type -- ^ η
                      -> TcS (StopOrContinue Ct)
-can_instance_of_inst ev ty1 ty2
+can_instance_of_inst ev lhs' rhs
   | CtWanted { ctev_dest = ev_dest, ctev_loc = loc } <- ev
-    = do { traceTcS "(<~)*: [W] ev_dest = " (ppr ev_dest)
-         ; let (vars, q, ty1') = tcSplitSigmaTy ty1
+    = do { -- split LHS
+           let (vars, q, lhs) = tcSplitSigmaTy lhs'
 
            -- generate new meta variables
          ; (subst, inst_vars) <- newMetaTyVars vars
          ; let vars' = mkTyVarTys inst_vars
 
-           -- instantiate θ and ty1
-         ; let ty1_inst : q_inst = substTy subst <$> ty1' : q
+           -- instantiate Q and lhs
+         ; let lhs_inst : q_inst = substTy subst <$> lhs : q
 
-           -- θ[as'/as]
+           -- emit constraints Q[as'/as]
          ; q' <- mapM (newWantedNC loc) q_inst
          ; emitWorkNC q'
 
-           -- ty1[as'/as] <~ ty2
-         ; innerEv <- newWantedNC loc (mkInstanceOfPred ty1_inst ty2)
+           -- [INNER]: lhs[as'/as] <~ rhs
+         ; inner_ev <- newWantedNC loc (mkInstanceOfPred lhs_inst rhs)
 
-           -- construct evidence for top-level
-         ; setWantedEvTerm ev_dest
-              (mkInstanceOfInst ty1 vars' (ctEvEvId innerEv) (ctEvEvId <$> q'))
+           -- set top-level evidence
+         ; setWantedEvTerm ev_dest $
+             mkInstanceOfInst lhs' vars' (ctEvEvId inner_ev) (ctEvEvId <$> q')
 
-         ; canInstanceOfNC innerEv ty1_inst ty2 }
+           -- continue with [INNER]
+         ; canInstanceOfNC inner_ev lhs_inst rhs }
 
   | otherwise
-    = stopWith ev "(<~)*: [GD] stop"
+  = stopWith ev "(<~)*: [GD] stop"
+
+{-
+************************************************************************
+*                                                                      *
+                  GenOf Canonicalization
+*                                                                      *
+************************************************************************
+-}
+canGenOfNC :: CtEvidence -> Type -> Type -> Type -> TcS (StopOrContinue Ct)
+canGenOfNC ev lhs rhs flgs
+  -- g ⪯ (∀a. Q => μ) ==> ∀a. (Q ⊃ g ⪯ μ) [GEN∀R]
+  | isForAllTy rhs
+  = traceTcS "[GEN∀R]" (ppr ev)
+      >> can_gen_of_r ev lhs rhs flgs
+
+  -- g ⪯ a^u ==> KEEP inert
+  | TyVarTy rhs_tv <- rhs
+  , isPolyTyVar rhs_tv
+  = do { addInertCan (CNonCanonical ev)
+       ; stopWith ev "(⪯): KEEP inert" }
+
+  -- (∀{u}. C => σ) ⪯ η ==> C /\ σ <= η [GEN∀L]
+  | otherwise
+  = traceTcS "[GEN∀L]" (ppr ev)
+      >> can_gen_of_l ev lhs rhs flgs
+
+
+can_gen_of_r :: CtEvidence
+             -> TcType
+             -> TcType
+             -> TcType
+             -> TcS (StopOrContinue Ct)
+can_gen_of_r ev lhs rhs flgs
+  | CtWanted { ctev_dest = ev_dest, ctev_loc = loc } <- ev
+  = do { -- split RHS
+         let (qvars, theta, rhs') = tcSplitSigmaTy rhs
+
+         -- skolemize
+       ; (subst, skol_tvs) <- tcInstSkolTyVarsX emptyTCvSubst qvars
+       ; theta_ids <- mapM newEvVar (substTheta subst theta)
+       ; let rhs'' = substTy subst rhs'
+       ; let skol_info = UnifyForAllSkol rhs''
+
+         -- ∀a. (Q ⊃ g ⪯ μ)
+       ; (inner_id, ev_binds)
+             <- checkConstraintsTcS skol_info skol_tvs theta_ids $
+                do { wanted_ev <- newWantedNC loc $ mkGenOfPred lhs rhs'' flgs
+                   ; return ( ctEvEvId wanted_ev
+                            , unitBag (mkNonCanonical wanted_ev)) }
+
+         -- set top-level evidence
+       ; let top_ev = mkGenOfR lhs skol_tvs theta_ids ev_binds inner_id
+       ; setWantedEvTerm ev_dest top_ev
+
+       ; stopWith ev "(⪯)r" }
+
+  | otherwise
+  = stopWith ev "(⪯)r: [GD] stop"
+
+can_gen_of_l :: CtEvidence
+             -> TcType -- ∀as. Q => σ
+             -> TcType -- η
+             -> TcType -- True <=> Mono, False <=> Poly
+             -> TcS (StopOrContinue Ct)
+can_gen_of_l ev lhs' rhs flgs
+  | CtWanted { ctev_dest = ev_dest, ctev_loc = loc } <- ev
+  = do { -- split LHS
+       ; let (vars, q, lhs) = tcSplitSigmaTy lhs'
+
+         -- generate new meta variables (abiding to given flags)
+       ; let toFlavour b = case b of { True -> Mono ; False -> Poly }
+       ; let flgsB = toFlavour <$> reifyGenFlags flgs
+       ; (subst, inst_vars) <- newMetaTyVarsWithFlags (vars `zip` flgsB)
+       ; let vars' = mkTyVarTys inst_vars
+
+         -- instantiate Q and lhs
+       ; let lhs_inst : q_inst = substTy subst <$> lhs : q
+
+         -- emit constraints Q[as'/as]
+       ; q' <- mapM (newWantedNC loc) q_inst
+       ; emitWorkNC q'
+
+         -- [INNER]: lhs[as'/as] <~ η
+       ; inner_ev <- newWantedNC loc (mkInstanceOfPred lhs_inst rhs)
+
+         -- set top-level evidence
+       ; setWantedEvTerm ev_dest $
+           mkGenOfL lhs' vars' (ctEvEvId inner_ev) (ctEvEvId <$> q') flgs
+
+         -- continue with [INNER]
+       ; canInstanceOfNC inner_ev lhs_inst rhs }
+
+  | otherwise
+  = stopWith ev "(⪯)l: [GD] stop"

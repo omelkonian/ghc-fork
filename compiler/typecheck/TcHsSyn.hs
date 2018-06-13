@@ -1060,6 +1060,8 @@ zonkCoFn env (WpTyApp ty)    = do { ty' <- zonkTcTypeToTypeX env ty
                                   ; return (env, WpTyApp ty') }
 zonkCoFn env (WpLet bs)      = do { (env1, bs') <- zonkTcEvBinds env bs
                                   ; return (env1, WpLet bs') }
+zonkCoFn env (WpEvInstOf ev) = return (env, WpEvInstOf (zonkIdOcc env ev))
+zonkCoFn env (WpEvGenOf ev)  = return (env, WpEvGenOf (zonkIdOcc env ev))
 
 -------------------------------------------------------------------------
 zonkOverLit :: ZonkEnv -> HsOverLit GhcTcId -> TcM (HsOverLit GhcTc)
@@ -1517,6 +1519,8 @@ zonkEvTerm env (EvTypeable ty ev)
   = EvTypeable <$> zonkTcTypeToTypeX env ty <*> zonkEvTypeable env ev
 zonkEvTerm env (EvInstOf ty ev)
   = EvInstOf <$> zonkTcTypeToTypeX env ty <*> zonkEvInstanceOf env ev
+zonkEvTerm env (EvGenOf ty ev)
+  = EvGenOf <$> zonkTcTypeToTypeX env ty <*> zonkEvGenOf env ev
 zonkEvTerm env (EvFun { et_tvs = tvs, et_given = evs
                       , et_binds = ev_binds, et_body = body_id })
   = do { (env0, new_tvs) <- zonkTyBndrsX env tvs
@@ -1652,6 +1656,19 @@ zonkEvInstanceOf env (EvInstOfInst tys innerEv q)
   = EvInstOfInst <$> mapM (zonkTcTypeToTypeX env) tys
                  <*> return (zonkIdOcc env innerEv)
                  <*> mapM (zonkEvTerm env) q
+
+zonkEvGenOf :: ZonkEnv -> EvGenOf -> TcM EvGenOf
+zonkEvGenOf env (EvGenOfL tys innerEv q flgs)
+  = EvGenOfL <$> mapM (zonkTcTypeToTypeX env) tys
+             <*> return (zonkIdOcc env innerEv)
+             <*> mapM (zonkEvTerm env) q
+             <*> return flgs
+zonkEvGenOf env (EvGenOfR tvs q_ids bnds innerEv)
+  = do { (env0, tvs')   <- zonkTyBndrsX env tvs
+       ; (env1, q_ids') <- zonkEvBndrsX env0 q_ids
+       ; (env2, bnds') <- zonkTcEvBinds env1 bnds
+       ; let innerEv' = zonkIdOcc env2 innerEv
+       ; return (EvGenOfR tvs' q_ids' bnds' innerEv') }
 
 {- Note [Optimise coercion zonking]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

@@ -9,7 +9,7 @@ module TcEvidence (
   (<.>), mkWpTyApps, mkWpEvApps, mkWpEvVarApps, mkWpTyLams,
   mkWpLams, mkWpLet, mkWpCastN, mkWpCastR, collectHsWrapBinders,
   mkWpFun, mkWpFuns, idHsWrapper, isIdHsWrapper, pprHsWrapper,
-  mkWpInstanceOf,
+  mkWpInstanceOf, mkWpGenOf,
 
   -- Evidence bindings
   TcEvBinds(..), EvBindsVar(..),
@@ -29,8 +29,10 @@ module TcEvidence (
   EvTypeable(..),
 
   -- InstanceOf
-  EvInstanceOf(..),
-  mkInstanceOfEq, mkInstanceOfInst,
+  EvInstanceOf(..), mkInstanceOfEq, mkInstanceOfInst,
+
+  -- GenOf
+  EvGenOf(..), mkGenOfL, mkGenOfR,
 
   -- TcCoercion
   TcCoercion, TcCoercionR, TcCoercionN, TcCoercionP, CoercionHole,
@@ -219,6 +221,7 @@ data HsWrapper
                                 -- so that the identity coercion is always exactly WpHole
 
   | WpEvInstOf EvVar     -- d []    the 'd' is evidence for an instantiation
+  | WpEvGenOf  EvVar     -- d []    the 'd' is evidence for a generalization/instantiation
 
 -- Cannot derive Data instance because SDoc is not Data (it stores a function).
 -- So we do it manually:
@@ -233,6 +236,7 @@ instance Data.Data HsWrapper where
   gfoldl k z (WpTyApp a1)       = z WpTyApp `k` a1
   gfoldl k z (WpLet a1)         = z WpLet `k` a1
   gfoldl k z (WpEvInstOf a1)    = z WpEvInstOf `k` a1
+  gfoldl k z (WpEvGenOf a1)     = z WpEvGenOf `k` a1
 
   gunfold k z c = case Data.constrIndex c of
                     1 -> z WpHole
@@ -255,6 +259,7 @@ instance Data.Data HsWrapper where
   toConstr (WpTyApp _)     = wpTyApp_constr
   toConstr (WpLet _)       = wpLet_constr
   toConstr (WpEvInstOf _)  = wpEvInstOf_constr
+  toConstr (WpEvGenOf _)   = wpEvGenOf_constr
 
   dataTypeOf _ = hsWrapper_dataType
 
@@ -263,10 +268,11 @@ hsWrapper_dataType
   = Data.mkDataType "HsWrapper"
       [ wpHole_constr, wpCompose_constr, wpFun_constr, wpCast_constr
       , wpEvLam_constr, wpEvApp_constr, wpTyLam_constr, wpTyApp_constr
-      , wpLet_constr, wpEvInstOf_constr]
+      , wpLet_constr, wpEvInstOf_constr, wpEvGenOf_constr]
 
 wpHole_constr, wpCompose_constr, wpFun_constr, wpCast_constr, wpEvLam_constr,
-  wpEvApp_constr, wpTyLam_constr, wpTyApp_constr, wpLet_constr, wpEvInstOf_constr :: Data.Constr
+  wpEvApp_constr, wpTyLam_constr, wpTyApp_constr, wpLet_constr,
+  wpEvInstOf_constr, wpEvGenOf_constr :: Data.Constr
 wpHole_constr     = mkHsWrapperConstr "WpHole"
 wpCompose_constr  = mkHsWrapperConstr "WpCompose"
 wpFun_constr      = mkHsWrapperConstr "WpFun"
@@ -277,6 +283,7 @@ wpTyLam_constr    = mkHsWrapperConstr "WpTyLam"
 wpTyApp_constr    = mkHsWrapperConstr "WpTyApp"
 wpLet_constr      = mkHsWrapperConstr "WpLet"
 wpEvInstOf_constr = mkHsWrapperConstr "WpEvInstOf"
+wpEvGenOf_constr  = mkHsWrapperConstr "WpEvGenOf"
 
 mkHsWrapperConstr :: String -> Data.Constr
 mkHsWrapperConstr name = Data.mkConstr hsWrapper_dataType name [] Data.Prefix
@@ -351,6 +358,9 @@ mkWpLet ev_binds                   = WpLet ev_binds
 
 mkWpInstanceOf :: EvVar -> HsWrapper
 mkWpInstanceOf v = WpEvInstOf v
+
+mkWpGenOf :: EvVar -> HsWrapper
+mkWpGenOf v = WpEvGenOf v
 
 mk_co_lam_fn :: (a -> HsWrapper) -> [a] -> HsWrapper
 mk_co_lam_fn f as = foldr (\x wrap -> f x <.> wrap) WpHole as
@@ -429,7 +439,7 @@ data EvBindsVar
     }
 
 instance Data.Data TcEvBinds where
-  -- Placeholder; we can't travers into TcEvBinds
+  -- Placeholder; we can't traverse into TcEvBinds
   toConstr _   = abstractConstr "TcEvBinds"
   gunfold _ _  = error "gunfold"
   dataTypeOf _ = Data.mkNoRepType "TcEvBinds"
@@ -540,7 +550,9 @@ data EvTerm
                               -- constructor, and can't just use EvExpr
       , et_body  :: EvVar }
 
-  | EvInstOf Type EvInstanceOf   -- Evidence for s1 <~ s2
+  | EvInstOf Type EvInstanceOf -- Evidence for σ1 <~ σ2
+
+  | EvGenOf Type EvGenOf       -- Evidence for g ⪯ σ
 
   deriving Data.Data
 
@@ -612,35 +624,72 @@ data EvCallStack
 
 
 {-
-Note [Evidence for InstanceOf constraints]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Note [Evidence for InstanceOf constraints (<~)]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-           g : s ~N t
-  --------------------------
-  EvInstOfEq g : s <~ t
+                            g : s ~N t
+                   -------------------------- [INSTε]
+                      EvInstOfEq g : s <~ t
 
 
-               g : (s[tys/as] <~ t),   vi : ci[tys/as]
-  ---------------------------------------------------------------------------
-  EvInstOfInst [t1..tm] g [v1..vn] : (forall a1..am., c1..ck => s) <~ t
+                g : (s[tys/as] <~ t),   vi : ci[tys/as]
+  ----------------------------------------------------------------- [INST∀L]
+    EvInstOfInst [t1..tm] g [v1..vn] : (∀a1..am, c1..ck => s) <~ t
 
 -}
+
 data EvInstanceOf
   = EvInstOfEq TcCoercion -- ^ a single coercion (when converting to `~`)
 
   | EvInstOfInst [Type]   -- ^ type variables to apply
-                 EvVar    -- ^ witness for inner (<~)
+                 EvId     -- ^ witness for inner (<~)
                  [EvTerm] -- ^ witness for inner constraints
-    deriving ( Data.Data, Data.Typeable )
+
+  deriving ( Data.Data, Data.Typeable )
 
 mkInstanceOfEq :: Type -> TcCoercion -> EvTerm
 mkInstanceOfEq ty co
   = EvInstOf ty (EvInstOfEq co)
 
-mkInstanceOfInst :: Type -> [Type] -> EvVar -> [EvVar] -> EvTerm
+mkInstanceOfInst :: Type -> [Type] -> EvId -> [EvId] -> EvTerm
 mkInstanceOfInst ty vars co q
   = EvInstOf ty (EvInstOfInst vars co (map (EvExpr . evId) q))
 
+{-
+Note [Evidence for GenOf constraints (~>)]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+                          g : (σ <~ η),   vi : ci
+  --------------------------------------------------------------------- [GEN∀L]
+     EvGenOfL [a1..am] g [v1..vn] flags : (∀ {a1..am}, c1..ck => σ) ⪯ η
+
+
+                   (inner, binds): ∀b. (g ⪯ σ)
+  --------------------------------------------------------------------- [GEN∀R]
+     EvGenOfR [a1..am] [v1..vn] binds inner : g ⪯ ∀b. σ
+
+-}
+
+data EvGenOf
+  = EvGenOfL [Type]   -- ^ type variables to apply
+             EvId     -- ^ witness for inner (<~)
+             [EvTerm] -- ^ witness for inner constraints
+             Type     -- ^ mono/poly flags
+
+  | EvGenOfR [TyVar]   -- ^ type variables to generalise
+             [EvId]    -- ^ witness for inner constraints
+             TcEvBinds -- ^ inner bindings
+             EvId      -- ^ witness for inner (<~) constraint
+
+  deriving ( Data.Data, Data.Typeable )
+
+mkGenOfL :: Type -> [Type] -> EvId -> [EvId] -> Type -> EvTerm
+mkGenOfL ty vars co q flgs
+  = EvGenOf ty (EvGenOfL vars co (map (EvExpr . evId) q) flgs)
+
+mkGenOfR :: Type -> [TyVar] -> [EvId] -> TcEvBinds -> EvId -> EvTerm
+mkGenOfR ty vars q bnds co
+  = EvGenOf ty (EvGenOfR vars q bnds co)
 
 {-
 Note [Typeable evidence terms]
@@ -899,6 +948,7 @@ evVarsOfTerm (EvExpr e)         = exprSomeFreeVars isEvVar e
 evVarsOfTerm (EvTypeable _ ev)  = evVarsOfTypeable ev
 evVarsOfTerm (EvFun {})         = emptyVarSet -- See Note [Free vars of EvFun]
 evVarsOfTerm (EvInstOf _ ev)    = evVarsOfInstanceOf ev
+evVarsOfTerm (EvGenOf _ ev)     = evVarsOfGenOf ev
 
 evVarsOfTerms :: [EvTerm] -> VarSet
 evVarsOfTerms = mapUnionVarSet evVarsOfTerm
@@ -912,10 +962,27 @@ evVarsOfTypeable ev =
     EvTypeableTyLit e     -> evVarsOfTerm e
 
 evVarsOfInstanceOf :: EvInstanceOf -> VarSet
-evVarsOfInstanceOf (EvInstOfEq co)
-  = coVarsOfTcCo co
-evVarsOfInstanceOf (EvInstOfInst _ innerEv q)
-  = unitUniqSet innerEv `unionVarSet` evVarsOfTerms q
+evVarsOfInstanceOf ev =
+  case ev of
+    EvInstOfEq co -> coVarsOfTcCo co
+    EvInstOfInst _ innerEv q ->
+      unitUniqSet innerEv `unionVarSet` evVarsOfTerms q
+
+evVarsOfGenOf :: EvGenOf -> VarSet
+evVarsOfGenOf ev =
+  case ev of
+    EvGenOfL _ innerEv q _ ->
+      unitUniqSet innerEv `unionVarSet` evVarsOfTerms q
+    EvGenOfR _ qvars (EvBinds bs) co ->
+      (foldrBag (unionVarSet . go_bind) (unitVarSet co) bs
+        `minusVarSet` get_bndrs bs) `minusVarSet` mkVarSet qvars
+    EvGenOfR _ _ _ _ -> emptyVarSet
+  where
+    -- Similar to `coVarsOfTcCo`
+    go_bind :: EvBind -> VarSet
+    go_bind (EvBind { eb_rhs = tm }) = evVarsOfTerm tm
+    get_bndrs :: Bag EvBind -> VarSet
+    get_bndrs = foldrBag (\(EvBind { eb_lhs = b }) bs -> extendVarSet bs b) emptyVarSet
 
 {- Note [Free vars of EvFun]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -959,6 +1026,7 @@ pprHsWrapper wrap pp_thing_inside
     help it (WpFun f1 f2 t1 _) = add_parens $ text "\\(x" <> dcolon <> ppr t1 <> text ")." <+>
                                               help (\_ -> it True <+> help (\_ -> text "x") f1 True) f2 False
     help it (WpEvInstOf id) = no_parens  $ sep [it False, text "<|", nest 2 (ppr id)]
+    help it (WpEvGenOf id)  = no_parens  $ sep [it False, text "<||", nest 2 (ppr id)]
     help it (WpCast co)     = add_parens $ sep [it False, nest 2 (text "|>"
                                               <+> pprParendCo co)]
     help it (WpEvApp id)  = no_parens  $ sep [it True, nest 2 (ppr id)]
@@ -1003,6 +1071,7 @@ instance Outputable EvTerm where
       = hang (text "\\" <+> sep (map pprLamBndr (tvs ++ gs)) <+> arrow)
            2 (ppr bs $$ ppr w)   -- Not very pretty
   ppr (EvInstOf ty ev)   = ppr ev <+> dcolon <+> text "InstOf" <+> ppr ty
+  ppr (EvGenOf ty ev)    = ppr ev <+> dcolon <+> text "GenOf" <+> ppr ty
 
 instance Outputable EvCallStack where
   ppr EvCsEmpty
@@ -1021,6 +1090,12 @@ instance Outputable EvInstanceOf where
     = text "EvInstOfEq" <+> ppr co
   ppr (EvInstOfInst vars co q)
     = text "EvInstOfInst" <+> ppr vars <+> ppr q <+> ppr co
+
+instance Outputable EvGenOf where
+  ppr (EvGenOfL vars co q flgs)
+    = text "EvGenOfL" <+> ppr vars <+> ppr q <+> ppr co <+> ppr flgs
+  ppr (EvGenOfR tvs qs bnds inner)
+    = hsep [text "EvGenOfR", ppr tvs, ppr qs, ppr bnds, ppr inner]
 
 ----------------------------------------------------------------------
 -- Helper functions for dealing with IP newtype-dictionaries

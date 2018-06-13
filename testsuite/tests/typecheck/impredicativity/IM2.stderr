@@ -1,0 +1,5 @@
+IM2.hs:14:6: error:
+    • Couldn't match type ‘Int’ with ‘[Char]’
+    • In the ambiguity check for ‘t’
+      To defer the ambiguity check to use sites, enable AllowAmbiguousTypes
+      In the type signature: t :: [Int] <~ [String] => Int

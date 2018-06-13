@@ -47,7 +47,8 @@ import TcEvidence
 import TcType
 import Type
 import Coercion
-import TysWiredIn ( typeNatKind, typeSymbolKind, instanceOfNewtypeAxiom )
+import TysWiredIn ( typeNatKind, typeSymbolKind
+                  , instanceOfNewtypeAxiom, genOfNewtypeAxiom )
 import Id
 import MkId(proxyHashId)
 import Name
@@ -1136,7 +1137,8 @@ dsHsWrapper (WpCast co)       = ASSERT(coercionRole co == Representational)
                                 return $ \e -> mkCastDs e co
 dsHsWrapper (WpEvApp tm)      = do { core_tm <- dsEvTerm tm
                                    ; return (\e -> App e core_tm) }
-dsHsWrapper (WpEvInstOf ev)   = pprPanic "TODO: dsHsWrapper" (ppr ev)
+dsHsWrapper (WpEvInstOf ev)   = pprPanic "T0D0: (<~) dsHsWrapper" (ppr ev)
+dsHsWrapper (WpEvGenOf ev)    = pprPanic "T0D0: (~>) dsHsWrapper" (ppr ev)
 
 
 --------------------------------------
@@ -1193,6 +1195,7 @@ dsEvTerm :: EvTerm -> DsM CoreExpr
 dsEvTerm (EvExpr e)          = return e
 dsEvTerm (EvTypeable ty ev)  = dsEvTypeable ty ev
 dsEvTerm (EvInstOf ty ev)    = dsEvInstanceOfBndr ty ev
+dsEvTerm (EvGenOf ty ev)     = dsEvGenOfBndr ty ev
 dsEvTerm (EvFun { et_tvs = tvs, et_given = given
                 , et_binds = ev_binds, et_body = wanted_id })
   = do { ds_ev_binds <- dsTcEvBinds ev_binds
@@ -1325,14 +1328,16 @@ tyConRep tc
 
 {-**********************************************************************
 *                                                                      *
-           Desugaring InstanceOf constraints
+           Desugaring InstanceOf constraints (<~)
 *                                                                      *
 **********************************************************************-}
 dsEvInstanceOfBndr :: Type -> EvInstanceOf -> DsM CoreExpr
 dsEvInstanceOfBndr ty (EvInstOfEq co)
   = do { bndr <- newSysLocalDs ty
+
        -- x |> x'
        ; let expr = Var bndr `mkCastDs` co
+
        -- (λx. x |> x') |> AXIOM
        ; return $ mkCoreLams [bndr] expr
                     `mkCastDs`
@@ -1347,7 +1352,7 @@ dsEvInstanceOfBndr ty (EvInstOfInst tys innerEv qs)
              (_, [ty1, ty2]) = tcSplitTyConApp inner
 
        ; qs' <- mapM dsEvTerm qs
-       ; let e' = e `mkCoreApps` tys' -- TODO: change to mkCoreAppsDs
+       ; let e' = e `mkCoreApps` tys' -- T0D0: change to mkCoreAppsDs
        ; let e'' = e' `mkCoreApps` qs'
 
        -- Use inner evidence
@@ -1359,6 +1364,54 @@ dsEvInstanceOfBndr ty (EvInstOfInst tys innerEv qs)
                     `mkCastDs`
                   SymCo (coInstanceOfArrow ty (exprType expr))
        }
+
 coInstanceOfArrow :: Type -> Type -> Coercion
 coInstanceOfArrow ty1 ty2
   = mkUnbranchedAxInstCo Representational instanceOfNewtypeAxiom [ty1, ty2] []
+
+{-**********************************************************************
+*                                                                      *
+           Desugaring GenOf constraints (~>)
+*                                                                      *
+**********************************************************************-}
+dsEvGenOfBndr :: Type -> EvGenOf -> DsM CoreExpr
+dsEvGenOfBndr ty (EvGenOfL tys innerEv qs flgs)
+  = do { bndr <- newSysLocalDs ty
+       -- x |> x'
+       ; let e     = Var bndr
+             tys'  = Type <$> tys   -- as'
+             inner = idType innerEv -- [as'/as]ty <~ ty2 <=> [as'/as]ty -> ty2
+             (_, [ty1, ty2]) = tcSplitTyConApp inner
+
+       ; qs' <- mapM dsEvTerm qs
+       ; let e' = e `mkCoreApps` tys' -- T0D0: change to mkCoreAppsDs
+       ; let e'' = e' `mkCoreApps` qs'
+
+       -- Use inner evidence
+       ; let expr = (Var innerEv `mkCastDs` coInstanceOfArrow ty1 ty2)
+                                 `mkCoreApps` [e'']
+
+       -- (λx. x |> x') |> AXIOM
+       ; return $ mkCoreLams [bndr] expr
+                    `mkCastDs`
+                  SymCo (coGenOfArrow ty (exprType expr) flgs)
+       }
+dsEvGenOfBndr ty (EvGenOfR tvs q_ids bnds innerEv)
+  = do { bndr <- newSysLocalDs ty
+       ; let (_, [ty1, ty2, flgs]) = splitTyConApp (idType innerEv)
+       ; bnds' <- dsTcEvBinds bnds
+
+       ; let expr = mkLams (tvs ++ q_ids) $
+                      mkCoreLets bnds' $
+                        (Var innerEv `mkCastDs` coGenOfArrow ty1 ty2 flgs)
+                          `mkCoreApps` [Var bndr]
+
+       -- (λx. x |> x') |> AXIOM
+       ; return $ mkCoreLams [bndr] expr
+                    `mkCastDs`
+                  SymCo (coGenOfArrow ty (exprType expr) flgs)
+       }
+
+coGenOfArrow :: Type -> Type -> Type -> Coercion
+coGenOfArrow ty1 ty2 flgs
+  = mkUnbranchedAxInstCo Representational genOfNewtypeAxiom [ty1, ty2, flgs] []

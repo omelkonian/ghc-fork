@@ -768,6 +768,8 @@ check_pred_help under_syn env dflags ctxt pred
 
       ForAllPred _ theta head -> check_quant_pred env dflags ctxt pred theta head
       IrredPred {}            -> check_irred_pred under_syn env dflags ctxt pred
+      InstanceOfPred {}       -> return ()
+      GenOfPred {}            -> return ()
 
 check_eq_pred :: TidyEnv -> DynFlags -> PredType -> TcM ()
 check_eq_pred env dflags pred
@@ -1525,6 +1527,7 @@ checkInstTermination theta head_pred
      = case classifyPredType pred of
          EqPred {}    -> return ()  -- See Trac #4200.
          InstanceOfPred {} -> return ()
+         GenOfPred {} -> return ()
          IrredPred {} -> check2 foralld_tvs pred (sizeType pred)
          ClassPred cls tys
            | isTerminatingClass cls
@@ -2168,6 +2171,7 @@ sizePred ty = goClass ty
     go (IrredPred ty)        = sizeType ty
     go (ForAllPred _ _ pred) = goClass pred
     go (InstanceOfPred {})   = 0
+    go (GenOfPred {})        = 0
 
 -- | When this says "True", ignore this class constraint during
 -- a termination check
