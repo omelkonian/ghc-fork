@@ -80,6 +80,10 @@ import qualified GHC.LanguageExtensions as LangExt
 import Data.Function
 import Data.List
 import qualified Data.Set as Set
+import Data.Maybe (catMaybes)
+
+import qualified FV as FV
+import qualified Bag as B
 
 {-
 ************************************************************************
@@ -1211,7 +1215,7 @@ tcApp _ (L loc (ExplicitList _ Nothing [])) [HsTypeArg ty_arg] res_ty
 
 tcApp m_herald fun args res_ty
   = do { (tc_fun, fun_ty) <- tcInferFun fun
-       ; tcFunApp m_herald fun tc_fun fun_ty args res_ty }
+       ; tcFunApp2 m_herald fun tc_fun fun_ty args res_ty }
 
 ---------------------
 tcFunApp :: Maybe SDoc  -- like "The function `f' is applied to"
@@ -1244,6 +1248,159 @@ tcFunApp m_herald rn_fun tc_fun fun_sigma rn_args res_ty
                        actual_res_ty res_ty
 
        ; return (wrap_res, mkLHsWrap wrap_fun tc_fun, tc_args) }
+
+tcFunApp2 :: Maybe SDoc  -- like "The function `f' is applied to"
+                         -- or leave out to get exactly that message
+          -> LHsExpr GhcRn                  -- Renamed function
+          -> LHsExpr GhcTcId -> TcSigmaType -- Function and its type
+          -> [LHsExprArgIn]                 -- Arguments
+          -> ExpRhoType                     -- Overall result type
+          -> TcM (HsWrapper, LHsExpr GhcTcId, [LHsExprArgOut])
+             -- (wrapper-for-result, fun, args)
+             -- For an ordinary function application,
+             -- these should be assembled as wrap_res[ fun args ]
+             -- But OpApp is slightly different, so that's why the caller
+             -- must assemble
+tcFunApp2 _ rn_fun tc_fun fun_sigma rn_args res_ty
+  -- Typechecking (f e₁ e₂ ... eₙ) with (Γ |- f : σ)
+  = do { traceTc "tcFunApp2" (vcat [ ppr rn_fun
+                                   , ppr tc_fun
+                                   , debugPprType fun_sigma
+                                   , ppr rn_args
+                                   , ppr res_ty ])
+       ; let orig = lexprCtOrigin rn_fun
+
+       -- Generate fresh 'poly' unification variables for the argument types
+       ; let handle arg
+              | isHsValArg arg = Just <$> newOpenFlexiTyVarTyWithFlag Poly
+              | otherwise      = return Nothing
+       ; as <- mapM handle rn_args
+
+       -- β is pushed in
+       ; MASSERT2 ( case res_ty of { Check _ -> True ; Infer _ -> False}
+                  , text "tcFunApp2: res_ty is Infer" )
+       ; b <- readExpType res_ty
+
+       -- Typecheck arguments (by "pushing in" αi as the expected type)
+       ; (wrap1, tc_args, fun_sigma') <- tcArgs2 orig rn_fun fun_sigma (rn_args `zip` as)
+
+       -- Emit: σ <~ α₁ -> α₂ -> ... -> αₙ -> β
+       ; let fun_res_ty = mkFunTys (catMaybes as) b
+       ; wrap_fun <- emitInstanceOf orig fun_sigma' fun_res_ty
+
+       -- Return: Γ |- f e₁ e₂ ... eₙ : β
+       ; return (idHsWrapper, mkLHsWrap (wrap1 <.> wrap_fun) tc_fun, tc_args) }
+
+emitInstanceOf :: CtOrigin -> Type -> Type -> TcM HsWrapper
+emitInstanceOf orig ty1 ty2 =
+  traceTc "[EMIT]" (ppr ty1 <+> text "<~" <+> ppr ty2) >>
+    mkWpInstanceOf <$> emitWantedEvVar orig (mkInstanceOfPred ty1 ty2)
+
+tcArgs2 :: CtOrigin
+        -> LHsExpr GhcRn
+             -- ^ The function itself (for err msgs only) orig_args
+        -> TcSigmaType
+             -- ^ the (uninstantiated) type of the function
+        -> [(LHsExprArgIn, Maybe TcType)]
+             -- ^ the args along with their unification variables
+        -> TcM (HsWrapper, [LHsExprArgOut], TcSigmaType)
+             -- ^ (function wrapper, the tc'd args, the (instantiated) type of the function)
+tcArgs2 orig fun orig_fun_ty orig_args
+  = traceTc "tcArgs2" (ppr orig_args) >> go orig_fun_ty 1 orig_args
+  where
+    go :: TcSigmaType -> Int -> [(LHsExprArgIn, Maybe TcType)]
+       -> TcM (HsWrapper, [LHsExprArgOut], TcSigmaType)
+    go fun_ty _ [] = return (idHsWrapper, [], fun_ty)
+    go fun_ty n ((HsValArg arg, Just arg_ty) : args)
+      = do { arg' <- tcArg2 orig fun arg n arg_ty
+           ; (wrap, args', fun_ty') <- go fun_ty (n + 1) args
+           ; return (wrap, HsValArg arg' : args', fun_ty') }
+    go fun_ty n ((HsArgPar sp, Nothing) : args)
+      = do { (wrap, args', fun_ty') <- go fun_ty (n + 1) args
+           ; return (wrap, HsArgPar sp : args', fun_ty') }
+    go fun_ty n ((HsTypeArg hs_ty_arg, Nothing) : args)
+      = do { (fun_wrap, upsilon_ty) <- topInstantiateInferred orig fun_ty
+           ; -- wrap1 :: fun_ty "->" upsilon_ty
+           ; case tcSplitForAllTy_maybe upsilon_ty of
+               Just (tvb, inner_ty) ->
+                 do { let tv   = binderVar tvb
+                          vis  = binderArgFlag tvb
+                          kind = tyVarKind tv
+                    ; MASSERT2( vis == Specified, ppr fun_ty )
+                    ; ty_arg <- tcHsTypeApp hs_ty_arg kind
+
+                    ; inner_ty <- zonkTcType inner_ty
+                          -- See Note [Visible type application zonk]
+
+                    ; let in_scope  = mkInScopeSet (tyCoVarsOfTypes [upsilon_ty, ty_arg])
+                          insted_ty = substTyWithInScope in_scope [tv] [ty_arg] inner_ty
+                                      -- NB: tv and ty_arg have the same kind, so this
+                                      --     substitution is kind-respecting
+
+                    ; (inner_wrap, args', fun_ty') <- go insted_ty (n + 1) args
+                    ; return ( inner_wrap <.> mkWpTyApps [ty_arg] <.> fun_wrap
+                             , HsTypeArg hs_ty_arg : args'
+                             , fun_ty' ) }
+               _ -> ty_app_err upsilon_ty hs_ty_arg }
+    go _ _ _
+      = pprPanic "tcArgs2" (text "malformed arguments:" <+> ppr orig_args)
+
+    ty_app_err ty arg
+      = do { (_, ty) <- zonkTidyTcType emptyTidyEnv ty
+           ; failWith $
+               text "Cannot apply expression of type" <+> quotes (ppr ty) $$
+               text "to a visible type argument" <+> quotes (ppr arg) }
+
+emitGenOf :: CtOrigin -> Type -> Type
+          -> [TcTyVar] -> Cts -> B.Bag Implication
+          -> TcM HsWrapper
+emitGenOf orig ty1 ty2 tvs qs is =
+  do { traceTc "[EMIT]" (ppr ty1 <+> text "~>" <+> ppr ty2)
+     ; let ty = ty1 `mkFunTy` ty2
+     ; new_cv <- newEvVar ty
+     ; loc <- getCtLocM orig Nothing
+     ; let ctev = CtWanted { ctev_dest = EvVarDest new_cv
+                           , ctev_pred = ty
+                           , ctev_nosh = WDeriv
+                           , ctev_loc  = loc }
+     ; let ct = (CtGen { gen_ev = ctev
+                       , gen_tvs = tvs
+                       , gen_wanted = qs
+                       , gen_implic = is
+                       , gen_lhs = ty1
+                       , gen_rhs = ty2 })
+     ; emitSimple $ CGenCan ct
+     ; return $ mkWpGenOf new_cv }
+
+tcArg2 :: CtOrigin
+       -> LHsExpr GhcRn                   -- The function (for error messages)
+       -> LHsExpr GhcRn                   -- Actual argument
+       -> Int                             -- # of argument
+       -> TcType                          -- the unification variable
+       -> TcM (LHsExpr GhcTcId)           -- Resulting argument
+tcArg2 orig fun arg arg_no a =
+  addErrCtxt (funAppCtxt fun arg arg_no) $
+  do { -- Γ |- e : σ ~> C
+     ; ((arg', arg_ty), WC c_wanted c_impl) <- captureConstraints $ tcInferSigmaNC arg
+
+     ; let c = ctPred <$> (B.bagToList c_wanted) :: [PredType]
+     ; traceTc "tcArg2" (text "Γ |-" <+> ppr arg' <+> text ":" <+> ppr arg_ty
+                          <+> text "~>" <+> ppr c)
+
+       -- v = fuv(σ, C) - fuv(Γ)
+     ; let fuv1 = tyCoFVsOfTypes (arg_ty:c) :: FV.FV
+     ; traceTc "fuv1" (ppr $ FV.fvVarList fuv1)
+     ; fuv2 <- tcGetGlobalTyCoVars
+     ; traceTc "fuv2" (ppr fuv2)
+     ; let v = (FV.fvVarList $ fuv2 `FV.delFVs` fuv1) :: [Var]
+     ; traceTc "v" (ppr v)
+
+       -- Emit: (∀v. C => σ) ≼ α '[flags of v]
+     ; wrap_res <- emitGenOf orig arg_ty a v c_wanted c_impl
+
+       -- Return: Γ |- e : α
+     ; return (mkLHsWrap wrap_res arg') }
+
 
 mk_app_msg :: LHsExpr GhcRn -> [LHsExprArgIn] -> SDoc
 mk_app_msg fun args = sep [ text "The" <+> text what <+> quotes (ppr expr)

@@ -49,6 +49,7 @@ import Type
 import Coercion
 import TysWiredIn ( typeNatKind, typeSymbolKind
                   , instanceOfNewtypeAxiom, genOfNewtypeAxiom )
+import TysPrim( funTyCon )
 import Id
 import MkId(proxyHashId)
 import Name
@@ -1137,8 +1138,8 @@ dsHsWrapper (WpCast co)       = ASSERT(coercionRole co == Representational)
                                 return $ \e -> mkCastDs e co
 dsHsWrapper (WpEvApp tm)      = do { core_tm <- dsEvTerm tm
                                    ; return (\e -> App e core_tm) }
-dsHsWrapper (WpEvInstOf ev)   = pprPanic "T0D0: (<~) dsHsWrapper" (ppr ev)
-dsHsWrapper (WpEvGenOf ev)    = pprPanic "T0D0: (~>) dsHsWrapper" (ppr ev)
+dsHsWrapper (WpEvInstOf ev)   = return $ applyInstanceOf ev
+dsHsWrapper (WpEvGenOf ev)    = return $ applyGenOf ev
 
 
 --------------------------------------
@@ -1333,41 +1334,36 @@ tyConRep tc
 **********************************************************************-}
 dsEvInstanceOfBndr :: Type -> EvInstanceOf -> DsM CoreExpr
 dsEvInstanceOfBndr ty (EvInstOfEq co)
-  = do { bndr <- newSysLocalDs ty
+  = do { bndr <- newSysLocalDs ty -- x :: a
+       -- e := x |> (a ~ b) :: b
+       ; let e = Var bndr `mkCastDs` co
+       -- (λx. x |> (a ~ b)) |> (sym ~>AXIOM) :: a <~ b
+       ; returnInstanceOf bndr e ty }
 
-       -- x |> x'
-       ; let expr = Var bndr `mkCastDs` co
-
-       -- (λx. x |> x') |> AXIOM
-       ; return $ mkCoreLams [bndr] expr
-                    `mkCastDs`
-                  SymCo (coInstanceOfArrow ty (exprType expr))
-       }
 dsEvInstanceOfBndr ty (EvInstOfInst tys innerEv qs)
-  = do { bndr <- newSysLocalDs ty
-       -- x |> x'
-       ; let e     = Var bndr
-             tys'  = Type <$> tys   -- as'
-             inner = idType innerEv -- [as'/as]ty <~ ty2 <=> [as'/as]ty -> ty2
-             (_, [ty1, ty2]) = tcSplitTyConApp inner
+  = do { bndr <- newSysLocalDs ty -- x :: ∀a. Q => σ
+       ; qs' <- mapM dsEvTerm qs -- qs :: [EvTerm]
+       -- e := x @tys @qs :: σ
+       ; let e = (Var bndr `mkCoreApps` (Type <$> tys)) `mkCoreApps` qs'
+       -- Use innerEv :: σ <~ η
+       -- expr := (innerEv |> ~>AXIOM) e :: η
+       ; let expr = applyInstanceOf innerEv e
+       -- (λx. (innerEv |> ~>AXIOM) (x @tys @qs)) |> (sym AXIOM) :: (∀a. Q => σ) <~ η
+       ; returnInstanceOf bndr expr ty }
 
-       ; qs' <- mapM dsEvTerm qs
-       ; let e' = e `mkCoreApps` tys' -- T0D0: change to mkCoreAppsDs
-       ; let e'' = e' `mkCoreApps` qs'
-
-       -- Use inner evidence
-       ; let expr = (Var innerEv `mkCastDs` coInstanceOfArrow ty1 ty2)
-                      `mkCoreApps` [e''] -- (λty -> ty2) ty => ty2
-
-       -- (λx. x |> x') |> AXIOM
-       ; return $ mkCoreLams [bndr] expr
-                    `mkCastDs`
-                  SymCo (coInstanceOfArrow ty (exprType expr))
-       }
+returnInstanceOf :: Id -> CoreExpr -> Type -> DsM CoreExpr
+returnInstanceOf bndr expr ty = return $
+  mkCoreLams [bndr] expr `mkCastDs` SymCo (coInstanceOfArrow ty (exprType expr))
 
 coInstanceOfArrow :: Type -> Type -> Coercion
 coInstanceOfArrow ty1 ty2
   = mkUnbranchedAxInstCo Representational instanceOfNewtypeAxiom [ty1, ty2] []
+
+applyInstanceOf :: EvVar -> CoreExpr -> CoreExpr
+applyInstanceOf ev e
+  | (_, [ty1, ty2]) <- tcSplitTyConApp (idType ev)
+  = (Var ev `mkCastDs` coInstanceOfArrow ty1 ty2) `mkCoreApps` [e]
+  | otherwise = pprPanic "applyInstanceOf: invalid evidence" (ppr ev)
 
 {-**********************************************************************
 *                                                                      *
@@ -1375,43 +1371,50 @@ coInstanceOfArrow ty1 ty2
 *                                                                      *
 **********************************************************************-}
 dsEvGenOfBndr :: Type -> EvGenOf -> DsM CoreExpr
-dsEvGenOfBndr ty (EvGenOfL tys innerEv qs flgs)
-  = do { bndr <- newSysLocalDs ty
-       -- x |> x'
-       ; let e     = Var bndr
-             tys'  = Type <$> tys   -- as'
-             inner = idType innerEv -- [as'/as]ty <~ ty2 <=> [as'/as]ty -> ty2
-             (_, [ty1, ty2]) = tcSplitTyConApp inner
+dsEvGenOfBndr ty (EvGenOfL innerEv)
+  = do { bndr <- newSysLocalDs ty -- x :: σ
+       -- e := x :: σ
+       ; let e = Var bndr
+       -- Use innerEv :: σ <~ η
+       -- expr := (innerEv |> <~AXIOM) e :: η
+       ; let expr = applyInstanceOf innerEv e
+       -- (λx. (innerEv |> ~>AXIOM) x) :: σ -> η
+       ; return $ mkCoreLams [bndr] expr }
 
-       ; qs' <- mapM dsEvTerm qs
-       ; let e' = e `mkCoreApps` tys' -- T0D0: change to mkCoreAppsDs
-       ; let e'' = e' `mkCoreApps` qs'
-
-       -- Use inner evidence
-       ; let expr = (Var innerEv `mkCastDs` coInstanceOfArrow ty1 ty2)
-                                 `mkCoreApps` [e'']
-
-       -- (λx. x |> x') |> AXIOM
-       ; return $ mkCoreLams [bndr] expr
-                    `mkCastDs`
-                  SymCo (coGenOfArrow ty (exprType expr) flgs)
-       }
 dsEvGenOfBndr ty (EvGenOfR tvs q_ids bnds innerEv)
-  = do { bndr <- newSysLocalDs ty
-       ; let (_, [ty1, ty2, flgs]) = splitTyConApp (idType innerEv)
-       ; bnds' <- dsTcEvBinds bnds
-
+  = do { bndr <- newSysLocalDs ty -- x :: g
+       ; bnds' <- dsTcEvBinds bnds -- bnds :: TcEvBinds
+       -- Use innerEv :: σ ⪯ μ
+       -- expr := λ as qs. let bnds in (innerEv |> <~AXIOM) x :: ∀a. Q => μ
        ; let expr = mkLams (tvs ++ q_ids) $
                       mkCoreLets bnds' $
-                        (Var innerEv `mkCastDs` coGenOfArrow ty1 ty2 flgs)
-                          `mkCoreApps` [Var bndr]
+                        applyGenOf innerEv (Var bndr)
+       -- (λx. λ as qs. let bnds in (innerEv |> <~AXIOM) x) :: g -> (∀a. Q => μ)
+       ; return $ mkCoreLams [bndr] expr }
 
-       -- (λx. x |> x') |> AXIOM
-       ; return $ mkCoreLams [bndr] expr
-                    `mkCastDs`
-                  SymCo (coGenOfArrow ty (exprType expr) flgs)
-       }
+dsEvGenOfBndr ty (EvFromSurface tys innerEv qs flgs)
+  = do { bndr <- newSysLocalDs ty -- x :: ∀a. Q => σ₁
+       ; qs' <- mapM dsEvTerm qs -- qs :: [EvTerm]
+       -- e := x @tys @qs :: σ₁
+       ; let e = (Var bndr `mkCoreApps` (Type <$> tys)) `mkCoreApps` qs'
+       -- Use innerEv :: σ₁ ⪯ σ₂
+       -- expr := (innerEv |> ~>AXIOM) e :: σ₂
+       ; let expr = applyGenOf innerEv e
+       -- (λx. (innerEv |> ~>AXIOM) (x @tys @qs)) |> (sym ~>AXIOM) :: (∀a. Q => σ₁) ⪯ σ₂
+       ; returnGenOf bndr expr ty flgs }
+
+returnGenOf :: Id -> CoreExpr -> Type -> Type -> DsM CoreExpr
+returnGenOf bndr expr ty flgs = return $
+  mkCoreLams [bndr] expr `mkCastDs` SymCo (coGenOfArrow ty (exprType expr) flgs)
 
 coGenOfArrow :: Type -> Type -> Type -> Coercion
 coGenOfArrow ty1 ty2 flgs
   = mkUnbranchedAxInstCo Representational genOfNewtypeAxiom [ty1, ty2, flgs] []
+
+applyGenOf :: EvVar -> CoreExpr -> CoreExpr
+applyGenOf ev e
+  | (tc, _) <- tcSplitTyConApp (idType ev)
+  , tc == funTyCon
+  = Var ev `mkCoreApps` [e]
+  | otherwise
+  = pprPanic "applyGenOf2: invalid evidence" (ppr ev <+> text "::" <+> ppr (idType ev))

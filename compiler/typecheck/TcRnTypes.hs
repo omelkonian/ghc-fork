@@ -68,7 +68,7 @@ module TcRnTypes(
         QCInst(..), isPendingScInst,
 
         -- Generalisation Constraints
-        -- GenConstraint(..),
+        CtGen(..),
 
         -- Canonical constraints
         Xi, Ct(..), Cts, emptyCts, andCts, andManyCts, pprCts,
@@ -1717,7 +1717,24 @@ data Ct
       --     look like this, with the payload in an
       --     auxiliary type
 
+  | CGenCan CtGen          -- A generalization constraint
+
 ------------
+
+data CtGen
+  -- Represents (forall as. C /\ I => σ₁) ~> σ₂
+  = CtGen
+      { gen_ev :: CtEvidence          -- always of type σ₁ -> σ₂, always Wanted
+      , gen_tvs :: [TcTyVar]          -- as
+      , gen_wanted :: Cts             -- C
+      , gen_implic :: Bag Implication -- I
+      , gen_lhs :: TcType             -- σ₁
+      , gen_rhs :: TcType             -- σ₂
+      }
+
+instance Outputable CtGen where
+  ppr (CtGen _ tvs wanted implic lhs rhs)
+    = ppr (tvs, wanted, implic, lhs, rhs)
 
 ------------
 data QCInst  -- A much simplified version of ClsInst
@@ -1821,6 +1838,7 @@ mkGivens loc ev_ids
 
 ctEvidence :: Ct -> CtEvidence
 ctEvidence (CQuantCan (QCI { qci_ev = ev })) = ev
+ctEvidence (CGenCan (CtGen { gen_ev = ev })) = ev
 ctEvidence ct = cc_ev ct
 
 ctLoc :: Ct -> CtLoc
@@ -1875,6 +1893,7 @@ instance Outputable Ct where
          CQuantCan (QCI { qci_pend_sc = pend_sc })
             | pend_sc   -> text "CQuantCan(psc)"
             | otherwise -> text "CQuantCan"
+         CGenCan ctGen  -> text "CGenCan" <+> ppr ctGen
 
 {-
 ************************************************************************

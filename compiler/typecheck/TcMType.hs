@@ -19,7 +19,7 @@ module TcMType (
   newFlexiTyVar,
   newFlexiTyVarTy,              -- Kind -> TcM TcType
   newFlexiTyVarTys,             -- Int -> Kind -> TcM [TcType]
-  newOpenFlexiTyVarTy, newOpenTypeKind,
+  newOpenFlexiTyVarTy, newOpenFlexiTyVarTyWithFlag, newOpenTypeKind,
   newMetaKindVar, newMetaKindVars, newMetaTyVarTyAtLevel,
   cloneMetaTyVar,
   newFmvTyVar, newFskTyVar,
@@ -865,6 +865,21 @@ newAnonMetaTyVar meta_info kind
         ; traceTc "newAnonMetaTyVar" (ppr tyvar)
         ; return tyvar }
 
+newAnonMetaTyVarWithFlag :: MetaInfo -> TcFlavour -> Kind -> TcM TcTyVar
+newAnonMetaTyVarWithFlag meta_info flav kind
+  = do { uniq <- newUnique
+       ; let name = mkMetaTyVarName uniq s
+             s = case meta_info of
+                       TauTv       -> fsLit "t"
+                       FlatMetaTv  -> fsLit "fmv"
+                       FlatSkolTv  -> fsLit "fsk"
+                       TyVarTv     -> fsLit "a"
+
+       ; details <- newMetaDetailsWithFlag meta_info flav
+       ; let tyvar = mkTcTyVar name kind details
+       ; traceTc "newAnonMetaTyVarWithFlag" (ppr tyvar)
+       ; return tyvar }
+
 cloneAnonMetaTyVar :: MetaInfo -> TyVar -> TcKind -> TcM TcTyVar
 -- Same as newAnonMetaTyVar, but use a supplied TyVar as the source of the print-name
 cloneAnonMetaTyVar info tv kind
@@ -896,9 +911,17 @@ influences the way it is tidied; see TypeRep.tidyTyVarBndr.
 newFlexiTyVar :: Kind -> TcM TcTyVar
 newFlexiTyVar kind = newAnonMetaTyVar TauTv kind
 
+newFlexiTyVarWithFlag :: TcFlavour -> Kind -> TcM TcTyVar
+newFlexiTyVarWithFlag = newAnonMetaTyVarWithFlag TauTv
+
 newFlexiTyVarTy :: Kind -> TcM TcType
 newFlexiTyVarTy kind = do
     tc_tyvar <- newFlexiTyVar kind
+    return (mkTyVarTy tc_tyvar)
+
+newFlexiTyVarTyWithFlag :: TcFlavour -> Kind -> TcM TcType
+newFlexiTyVarTyWithFlag flav kind = do
+    tc_tyvar <- newFlexiTyVarWithFlag flav kind
     return (mkTyVarTy tc_tyvar)
 
 newFlexiTyVarTys :: Int -> Kind -> TcM [TcType]
@@ -915,6 +938,10 @@ newOpenFlexiTyVarTy :: TcM TcType
 newOpenFlexiTyVarTy
   = do { kind <- newOpenTypeKind
        ; newFlexiTyVarTy kind }
+
+newOpenFlexiTyVarTyWithFlag :: TcFlavour -> TcM TcType
+newOpenFlexiTyVarTyWithFlag flav
+  = newFlexiTyVarTyWithFlag flav =<< newOpenTypeKind
 
 newMetaTyVarTyVars :: [TyVar] -> TcM (TCvSubst, [TcTyVar])
 newMetaTyVarTyVars = mapAccumLM newMetaTyVarTyVarX emptyTCvSubst

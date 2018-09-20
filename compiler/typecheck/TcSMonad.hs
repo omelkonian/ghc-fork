@@ -61,7 +61,7 @@ module TcSMonad (
     getUnsolvedInerts,
     removeInertCts, getPendingGivenScs,
     addInertCan, insertFunEq, addInertForAll,
-    emitWorkNC, emitWork,
+    emitWorkNC, emitWork, emitImplications,
     isImprovable,
 
     -- The Model
@@ -659,6 +659,8 @@ data InertCans   -- See Note [Detailed InertCans Invariants] for more
               --     wrt inert_eqs
 
        , inert_insts :: [QCInst]
+
+       -- , T0D0 add inert_ctgen :: [CtGen]
 
        , inert_safehask :: DictMap Ct
               -- Failed dictionary resolution due to Safe Haskell overlapping
@@ -2239,6 +2241,7 @@ removeInertCt is ct =
     CIrredCan {}      -> panic "removeInertCt: CIrredEvCan"
     CNonCanonical {}  -> panic "removeInertCt: CNonCanonical"
     CHoleCan {}       -> panic "removeInertCt: CHoleCan"
+    CGenCan {}        -> panic "removeInertCt: CGenCan"
 
 
 lookupFlatCache :: TyCon -> [Type] -> TcS (Maybe (TcCoercion, TcType, CtFlavour))
@@ -2955,6 +2958,9 @@ emitWork :: [Ct] -> TcS ()
 emitWork cts
   = do { traceTcS "Emitting fresh work" (vcat (map ppr cts))
        ; updWorkListTcS (extendWorkListCts cts) }
+
+emitImplications :: Bag Implication -> TcS ()
+emitImplications is = wrapTcS (TcM.emitImplications is)
 
 newTcRef :: a -> TcS (TcRef a)
 newTcRef x = wrapTcS (TcM.newTcRef x)

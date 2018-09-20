@@ -32,7 +32,7 @@ module TcEvidence (
   EvInstanceOf(..), mkInstanceOfEq, mkInstanceOfInst,
 
   -- GenOf
-  EvGenOf(..), mkGenOfL, mkGenOfR,
+  EvGenOf(..), mkGenOfL, mkGenOfR, mkGenOfFromSurface,
 
   -- TcCoercion
   TcCoercion, TcCoercionR, TcCoercionN, TcCoercionP, CoercionHole,
@@ -659,37 +659,46 @@ mkInstanceOfInst ty vars co q
 Note [Evidence for GenOf constraints (~>)]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-                          g : (σ <~ η),   vi : ci
+                          g : (σ <~ η)
   --------------------------------------------------------------------- [GEN∀L]
-     EvGenOfL [a1..am] g [v1..vn] flags : (∀ {a1..am}, c1..ck => σ) ⪯ η
+            EvGenOfL g : σ ⪯ η
 
 
-                   (inner, binds): ∀b. (g ⪯ σ)
+                    (inner, binds): ∀b. (g ⪯ σ)
   --------------------------------------------------------------------- [GEN∀R]
-     EvGenOfR [a1..am] [v1..vn] binds inner : g ⪯ ∀b. σ
+          EvGenOfR [a1..am] [v1..vn] binds inner : g ⪯ ∀b. σ
 
+
+                inner: σ ⪯ η          vi:ci
+  ------------------------------------------------------------------- [GEN_INIT]
+  EvFromSurface [a1..am] [v1..vn] inner : (∀{a1..am}. c1..ck => σ ⪯ η)
 -}
-
 data EvGenOf
-  = EvGenOfL [Type]   -- ^ type variables to apply
-             EvId     -- ^ witness for inner (<~)
-             [EvTerm] -- ^ witness for inner constraints
-             Type     -- ^ mono/poly flags
+  = EvGenOfL EvId -- ^ witness for inner (<~)
 
   | EvGenOfR [TyVar]   -- ^ type variables to generalise
              [EvId]    -- ^ witness for inner constraints
              TcEvBinds -- ^ inner bindings
-             EvId      -- ^ witness for inner (<~) constraint
+             EvId      -- ^ witness for inner (⪯) constraint
+
+  | EvFromSurface [Type]   -- ^ type variables to apply
+                  EvId     -- ^ witness for (⪯)
+                  [EvTerm] -- ^ witness for inner constraints
+                  Type     -- ^ mono/poly flags
 
   deriving ( Data.Data, Data.Typeable )
 
-mkGenOfL :: Type -> [Type] -> EvId -> [EvId] -> Type -> EvTerm
-mkGenOfL ty vars co q flgs
-  = EvGenOf ty (EvGenOfL vars co (map (EvExpr . evId) q) flgs)
+mkGenOfL :: Type -> EvId -> EvTerm
+mkGenOfL ty co
+  = EvGenOf ty (EvGenOfL co)
 
 mkGenOfR :: Type -> [TyVar] -> [EvId] -> TcEvBinds -> EvId -> EvTerm
 mkGenOfR ty vars q bnds co
   = EvGenOf ty (EvGenOfR vars q bnds co)
+
+mkGenOfFromSurface :: Type -> [Type] -> EvId -> [EvId] -> Type -> EvTerm
+mkGenOfFromSurface ty vars co q flgs
+  = EvGenOf ty (EvFromSurface vars co ((EvExpr . evId) <$> q) flgs)
 
 {-
 Note [Typeable evidence terms]
@@ -971,12 +980,15 @@ evVarsOfInstanceOf ev =
 evVarsOfGenOf :: EvGenOf -> VarSet
 evVarsOfGenOf ev =
   case ev of
-    EvGenOfL _ innerEv q _ ->
-      unitUniqSet innerEv `unionVarSet` evVarsOfTerms q
+    EvGenOfL innerEv ->
+      unitUniqSet innerEv
     EvGenOfR _ qvars (EvBinds bs) co ->
       (foldrBag (unionVarSet . go_bind) (unitVarSet co) bs
         `minusVarSet` get_bndrs bs) `minusVarSet` mkVarSet qvars
-    EvGenOfR _ _ _ _ -> emptyVarSet
+    EvGenOfR _ _ _ _ ->
+      emptyVarSet
+    EvFromSurface _ innerEv q _ ->
+      unitUniqSet innerEv `unionVarSet` evVarsOfTerms q
   where
     -- Similar to `coVarsOfTcCo`
     go_bind :: EvBind -> VarSet
@@ -1092,10 +1104,12 @@ instance Outputable EvInstanceOf where
     = text "EvInstOfInst" <+> ppr vars <+> ppr q <+> ppr co
 
 instance Outputable EvGenOf where
-  ppr (EvGenOfL vars co q flgs)
-    = text "EvGenOfL" <+> ppr vars <+> ppr q <+> ppr co <+> ppr flgs
+  ppr (EvGenOfL co)
+    = hsep [text "EvGenOfL", ppr co]
   ppr (EvGenOfR tvs qs bnds inner)
     = hsep [text "EvGenOfR", ppr tvs, ppr qs, ppr bnds, ppr inner]
+  ppr (EvFromSurface tvs inner qs flgs)
+    = hsep [text "EvFromSurface", ppr tvs, ppr inner, ppr qs, ppr flgs]
 
 ----------------------------------------------------------------------
 -- Helper functions for dealing with IP newtype-dictionaries

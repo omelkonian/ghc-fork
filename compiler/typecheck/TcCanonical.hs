@@ -97,7 +97,7 @@ canonicalize (CNonCanonical { cc_ev = ev })
       InstanceOfPred ty1 ty2 -> do traceTcS "canEvNC:inst" (ppr ty1 $$ ppr ty2 $$ ppr ev)
                                    canInstanceOfNC ev ty1 ty2
       GenOfPred ty1 ty2 flgs -> do traceTcS "canEvNC:gen" (ppr ty1 $$ ppr ty2 $$ ppr flgs $$ ppr ev)
-                                   canGenOfNC ev ty1 ty2 flgs
+                                   canGenOfFromSurface ev ty1 ty2 flgs
   where
     pred = ctEvPred ev
 
@@ -139,6 +139,9 @@ canonicalize (CFunEqCan { cc_ev = ev
 
 canonicalize (CHoleCan { cc_ev = ev, cc_hole = hole })
   = canHole ev hole
+
+canonicalize (CGenCan ctGen)
+  = canGenOfNC ctGen
 
 {-
 ************************************************************************
@@ -652,6 +655,7 @@ canIrred ev
            ClassPred cls tys      -> canClassNC new_ev cls tys
            EqPred eq_rel ty1 ty2  -> canEqNC new_ev eq_rel ty1 ty2
            InstanceOfPred ty1 ty2 -> canInstanceOfNC new_ev ty1 ty2
+           GenOfPred ty1 ty2 flgs -> canGenOfFromSurface new_ev ty1 ty2 flgs
            _                      -> continueWith $
                                      mkIrredCt new_ev } }
 
@@ -2483,15 +2487,17 @@ canInstanceOfNC ev ty1 ty2
   = traceTcS "[INSTε]" (ppr ev)
       >> can_instance_of_eq ev ty1 ty2
 
+    -- a^u <~ η ==> KEEP inert
+  | TyVarTy tv <- ty1
+  , isPolyTyVar tv
+  = traceTcS "[INST_KEEP]" (ppr ev)
+      >> continueWith (mkIrredCt ev)
+
     -- ∀as. σ <~ η ==> inst(σ) <~ η [INST∀L]
-  | isForAllTy ty1
+    -- NB: `as can be empty, as in ∀∅. C => σ
+  | otherwise
   = traceTcS "[INST∀L]" (ppr ev)
       >> can_instance_of_inst ev ty1 ty2
-
-    -- a^u <~ η ==> KEEP inert
-  | otherwise
-  = do { addInertCan (CNonCanonical ev)
-       ; stopWith ev "(<~): KEEP inert" }
 
 can_instance_of_eq :: CtEvidence -> Type -> Type -> TcS (StopOrContinue Ct)
 can_instance_of_eq ev ty1 ty2
@@ -2501,7 +2507,7 @@ can_instance_of_eq ev ty1 ty2
        ; canEqNC new_ev NomEq ty1 ty2 }
 
   | otherwise
-  = stopWith ev "(<~): [GD] stop"
+  = stopWith ev "(<~)eq: [GD] stop"
 
 can_instance_of_inst :: CtEvidence
                      -> Type -- ^ ∀α. Q => σ
@@ -2534,7 +2540,7 @@ can_instance_of_inst ev lhs' rhs
          ; canInstanceOfNC inner_ev lhs_inst rhs }
 
   | otherwise
-  = stopWith ev "(<~)*: [GD] stop"
+  = stopWith ev "(<~)inst: [GD] stop"
 
 {-
 ************************************************************************
@@ -2543,50 +2549,119 @@ can_instance_of_inst ev lhs' rhs
 *                                                                      *
 ************************************************************************
 -}
-canGenOfNC :: CtEvidence -> Type -> Type -> Type -> TcS (StopOrContinue Ct)
-canGenOfNC ev lhs rhs flgs
+
+mkGenOfCt :: CtLoc -> Type -> Type -> TcS Ct
+mkGenOfCt loc ty1 ty2
+  = do { let ty = ty1 `mkFunTy` ty2
+       ; new_cv <- newEvVar ty
+       ; let ctev = CtWanted { ctev_dest = EvVarDest new_cv
+                             , ctev_pred = ty
+                             , ctev_nosh = WDeriv
+                             , ctev_loc = loc }
+       ; return $ CGenCan $ CtGen { gen_ev = ctev
+                                  , gen_tvs = []
+                                  , gen_wanted = emptyBag
+                                  , gen_implic = emptyBag
+                                  , gen_lhs = ty1
+                                  , gen_rhs = ty2 } }
+
+canGenOfFromSurface :: CtEvidence -> Type -> Type -> Type -> TcS (StopOrContinue Ct)
+canGenOfFromSurface ev ty1 ty2 flgs
+  | CtWanted { ctev_dest = ev_dest, ctev_loc = loc } <- ev
+  = do { -- Instantiate meta-variables (abiding to flags)
+       ; let (vars, q, lhs) = tcSplitSigmaTy ty1
+       ; let flgsB = boolToFlavour <$> reifyGenFlags flgs
+       ; (subst, inst_vars) <- newMetaTyVarsWithFlags (vars `zip` flgsB)
+
+         -- instantiate Q and lhs
+       ; let lhs_inst : q_inst = substTy subst <$> lhs : q
+
+         -- emit constraints Q[as'/as]
+       ; q' <- (mkNonCanonical <$>) <$> mapM (newWantedNC loc) q_inst
+       ; emitWork q'
+
+       ; inner_ct <- mkGenOfCt loc lhs_inst ty2
+       ; let top_ev = mkGenOfFromSurface ty1
+                                         (mkTyVarTys inst_vars)
+                                         (ctEvId inner_ct)
+                                         (ctEvId <$> q')
+                                         flgs
+       ; setWantedEvTerm ev_dest top_ev
+
+       ; canGenOfNC (CtGen { gen_ev = ctEvidence inner_ct
+                           , gen_tvs = inst_vars
+                           , gen_wanted = listToBag q'
+                           , gen_implic = emptyBag
+                           , gen_lhs = lhs_inst
+                           , gen_rhs = ty2
+                           }) }
+  | otherwise
+  = stopWith ev "(~>): [GD] stop"
+
+canGenOfNC :: CtGen -> TcS (StopOrContinue Ct)
+canGenOfNC ctGen@(CtGen ev _ _ _ _ rhs)
   -- g ⪯ (∀a. Q => μ) ==> ∀a. (Q ⊃ g ⪯ μ) [GEN∀R]
   | isForAllTy rhs
   = traceTcS "[GEN∀R]" (ppr ev)
-      >> can_gen_of_r ev lhs rhs flgs
+      >> can_gen_of_r ctGen
 
   -- g ⪯ a^u ==> KEEP inert
   | TyVarTy rhs_tv <- rhs
   , isPolyTyVar rhs_tv
-  = do { addInertCan (CNonCanonical ev)
-       ; stopWith ev "(⪯): KEEP inert" }
+  = traceTcS "[GEN_KEEP]" (ppr ev)
+      >> continueWith (mkIrredCt ev)
+  -- T0D0 try to just stopWith ev
 
   -- (∀{u}. C => σ) ⪯ η ==> C /\ σ <= η [GEN∀L]
   | otherwise
   = traceTcS "[GEN∀L]" (ppr ev)
-      >> can_gen_of_l ev lhs rhs flgs
+      >> can_gen_of_l ctGen
 
+-- [GEN∀L]
+can_gen_of_l :: CtGen -> TcS (StopOrContinue Ct)
+can_gen_of_l (CtGen ev _ qs is lhs rhs)
+  | CtWanted { ctev_dest = ev_dest, ctev_loc = loc } <- ev
+  = do { -- [INNER]: lhs <~ η
+       ; inner_ev <- newWantedNC loc (mkInstanceOfPred lhs rhs)
 
-can_gen_of_r :: CtEvidence
-             -> TcType
-             -> TcType
-             -> TcType
-             -> TcS (StopOrContinue Ct)
-can_gen_of_r ev lhs rhs flgs
+         -- emit wanted constraints and implications
+       ; emitWork (bagToList qs)
+       ; emitImplications is
+
+         -- set top-level evidence
+       ; let top_ev = mkGenOfL lhs (ctEvEvId inner_ev)
+       ; setWantedEvTerm ev_dest top_ev
+
+         -- continue with [INNER]
+       ; canInstanceOfNC inner_ev lhs rhs }
+
+  | otherwise
+  = stopWith ev "(⪯)l: [GD] stop"
+
+-- [GEN∀R]
+can_gen_of_r :: CtGen -> TcS (StopOrContinue Ct)
+can_gen_of_r (CtGen ev tvs _ _ lhs rhs)
   | CtWanted { ctev_dest = ev_dest, ctev_loc = loc } <- ev
   = do { -- split RHS
-         let (qvars, theta, rhs') = tcSplitSigmaTy rhs
+       ; let (qvars, theta, rhs') = tcSplitSigmaTy rhs
 
          -- skolemize
        ; (subst, skol_tvs) <- tcInstSkolTyVarsX emptyTCvSubst qvars
        ; theta_ids <- mapM newEvVar (substTheta subst theta)
        ; let rhs'' = substTy subst rhs'
-       ; let skol_info = UnifyForAllSkol rhs''
+       ; let skol_info = ForAllSkol (ppr rhs) -- UnifyForAllSkol rhs''
+
+         -- Push tcLevel of inner
+       ; let lhs' = pushTcLevelInType tvs lhs
 
          -- ∀a. (Q ⊃ g ⪯ μ)
        ; (inner_id, ev_binds)
              <- checkConstraintsTcS skol_info skol_tvs theta_ids $
-                do { wanted_ev <- newWantedNC loc $ mkGenOfPred lhs rhs'' flgs
-                   ; return ( ctEvEvId wanted_ev
-                            , unitBag (mkNonCanonical wanted_ev)) }
+                do { ct <- mkGenOfCt loc lhs' rhs''
+                   ; return (ctEvId ct, unitBag ct) }
 
          -- set top-level evidence
-       ; let top_ev = mkGenOfR lhs skol_tvs theta_ids ev_binds inner_id
+       ; let top_ev = mkGenOfR lhs' skol_tvs theta_ids ev_binds inner_id
        ; setWantedEvTerm ev_dest top_ev
 
        ; stopWith ev "(⪯)r" }
@@ -2594,38 +2669,21 @@ can_gen_of_r ev lhs rhs flgs
   | otherwise
   = stopWith ev "(⪯)r: [GD] stop"
 
-can_gen_of_l :: CtEvidence
-             -> TcType -- ∀as. Q => σ
-             -> TcType -- η
-             -> TcType -- True <=> Mono, False <=> Poly
-             -> TcS (StopOrContinue Ct)
-can_gen_of_l ev lhs' rhs flgs
-  | CtWanted { ctev_dest = ev_dest, ctev_loc = loc } <- ev
-  = do { -- split LHS
-       ; let (vars, q, lhs) = tcSplitSigmaTy lhs'
-
-         -- generate new meta variables (abiding to given flags)
-       ; let toFlavour b = case b of { True -> Mono ; False -> Poly }
-       ; let flgsB = toFlavour <$> reifyGenFlags flgs
-       ; (subst, inst_vars) <- newMetaTyVarsWithFlags (vars `zip` flgsB)
-       ; let vars' = mkTyVarTys inst_vars
-
-         -- instantiate Q and lhs
-       ; let lhs_inst : q_inst = substTy subst <$> lhs : q
-
-         -- emit constraints Q[as'/as]
-       ; q' <- mapM (newWantedNC loc) q_inst
-       ; emitWorkNC q'
-
-         -- [INNER]: lhs[as'/as] <~ η
-       ; inner_ev <- newWantedNC loc (mkInstanceOfPred lhs_inst rhs)
-
-         -- set top-level evidence
-       ; setWantedEvTerm ev_dest $
-           mkGenOfL lhs' vars' (ctEvEvId inner_ev) (ctEvEvId <$> q') flgs
-
-         -- continue with [INNER]
-       ; canInstanceOfNC inner_ev lhs_inst rhs }
-
+-- T0D0: use mapType with TyCoMapper
+pushTcLevelInType :: [TcTyVar] -> Type -> Type
+pushTcLevelInType tvs (AppTy t t')
+  = AppTy (pushTcLevelInType tvs t) (pushTcLevelInType tvs t')
+pushTcLevelInType tvs (TyConApp tyCon ts)
+  = TyConApp tyCon (pushTcLevelInType tvs <$> ts)
+pushTcLevelInType tvs (ForAllTy bndr t)
+  = ForAllTy bndr (pushTcLevelInType tvs t)
+pushTcLevelInType tvs (FunTy t t')
+  = FunTy (pushTcLevelInType tvs t) (pushTcLevelInType tvs t')
+pushTcLevelInType tvs (CastTy t co)
+  = CastTy (pushTcLevelInType tvs t) co
+pushTcLevelInType tvs (TyVarTy v)
+  | v `elem` tvs
+  = TyVarTy $ setMetaTyVarTcLevel v (pushTcLevel $ tcTyVarLevel v)
   | otherwise
-  = stopWith ev "(⪯)l: [GD] stop"
+  = TyVarTy v
+pushTcLevelInType _ x = x

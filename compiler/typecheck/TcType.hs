@@ -48,7 +48,8 @@ module TcType (
   isTouchableMetaTyVar, metaTyVarFlavor, metaTyVarFlavor_maybe,
   isFloatedTouchableMetaTyVar,
   findDupTyVarTvs, mkTyVarNamePairs,
-  mkInstanceOfPred, mkGenOfPred, reifyGenFlags,
+  mkInstanceOfPred, mkGenOfPred, reifyGenFlags, promoteGenFlags,
+  getFlag, boolToFlavour, flavourToBool,
 
   --------------------------------
   -- Builders
@@ -215,8 +216,7 @@ import Name -- hiding (varName)
 import NameSet
 import VarEnv
 import PrelNames
-import TysWiredIn( coercibleClass, unitTyCon, unitTyConKey
-                 , listTyCon, constraintKind, instanceOfTyCon, genOfTyCon )
+import TysWiredIn
 import BasicTypes
 import Util
 import Maybes
@@ -1418,6 +1418,28 @@ promotedHasKey tyCon key
   | otherwise
   = False
 
+promoteGenFlags :: [Bool] -> Type
+promoteGenFlags = mkPromotedListTy boolTy . fmap promoteBool
+  where
+    promoteBool :: Bool -> Type
+    promoteBool True  = mkTyConApp promotedTrueDataCon []
+    promoteBool False = mkTyConApp promotedFalseDataCon []
+
+flavourToBool :: TcFlavour -> Bool
+flavourToBool Mono = True
+flavourToBool Poly = False
+
+boolToFlavour :: Bool -> TcFlavour
+boolToFlavour True  = Mono
+boolToFlavour False = Poly
+
+getFlag :: TcTyVar -> Bool
+getFlag tv
+  | MetaTv { mtv_flavor = flav } <- tcTyVarDetails tv
+  = flavourToBool flav
+  | otherwise
+  = error "getFlag: not a meta-tv"
+
 {-
 ************************************************************************
 *                                                                      *
@@ -2368,8 +2390,7 @@ isRhoTy ty | Just ty' <- tcView ty = isRhoTy ty'
 isRhoTy (ForAllTy {}) = False
 isRhoTy (FunTy a r)   = not (isPredTy a) && isRhoTy r
 isRhoTy (TyVarTy tv)
-  | isMetaTyVar tv, isPolyTyVar tv
-  = False
+  | isPolyTyVar tv    = False
 isRhoTy _             = True
 
 -- | Like 'isRhoTy', but also says 'True' for 'Infer' types

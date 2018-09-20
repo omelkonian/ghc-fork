@@ -1658,17 +1658,19 @@ zonkEvInstanceOf env (EvInstOfInst tys innerEv q)
                  <*> mapM (zonkEvTerm env) q
 
 zonkEvGenOf :: ZonkEnv -> EvGenOf -> TcM EvGenOf
-zonkEvGenOf env (EvGenOfL tys innerEv q flgs)
-  = EvGenOfL <$> mapM (zonkTcTypeToTypeX env) tys
-             <*> return (zonkIdOcc env innerEv)
-             <*> mapM (zonkEvTerm env) q
-             <*> return flgs
+zonkEvGenOf env (EvGenOfL innerEv)
+  = EvGenOfL <$> return (zonkIdOcc env innerEv)
 zonkEvGenOf env (EvGenOfR tvs q_ids bnds innerEv)
   = do { (env0, tvs')   <- zonkTyBndrsX env tvs
        ; (env1, q_ids') <- zonkEvBndrsX env0 q_ids
        ; (env2, bnds') <- zonkTcEvBinds env1 bnds
        ; let innerEv' = zonkIdOcc env2 innerEv
        ; return (EvGenOfR tvs' q_ids' bnds' innerEv') }
+zonkEvGenOf env (EvFromSurface tys innerEv q flgs)
+  = EvFromSurface <$> mapM (zonkTcTypeToTypeX env) tys
+                  <*> return (zonkIdOcc env innerEv)
+                  <*> mapM (zonkEvTerm env) q
+                  <*> return flgs
 
 {- Note [Optimise coercion zonking]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
